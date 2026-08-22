@@ -16,7 +16,7 @@
       label-position="right"
     >
       <el-tabs v-model="activeTab" class="device-form-tabs">
-        <el-tab-pane label="基本信息" name="basic">
+        <el-tab-pane :label="$t('addDevice.tabBasic')" name="basic">
           <DeviceFormBasic
             :model-value="form"
             :group-options="deviceGroupOptions"
@@ -27,6 +27,7 @@
             v-model:media-type="mediaType"
             :protocols="protocols"
             :serial-ports="serialPorts"
+            :hydrating="loadingChannel"
           />
 
           <DeviceFormPoints
@@ -35,13 +36,14 @@
             :conn-type="form.conn_type"
             :disabled="saving"
             :is-edit-mode="isEditMode"
+            :point-mode="dlt645PointMode"
             @file-change="(f) => (selectedFile = f)"
             @icd-file-change="handleIcdFileChange"
             @point-mode-change="(mode) => (dlt645PointMode = mode)"
           />
         </el-tab-pane>
 
-        <el-tab-pane label="协议参数" name="protocol">
+        <el-tab-pane :label="$t('addDevice.tabProtocol')" name="protocol">
           <DeviceProtocolParams
             ref="protocolParamsCompRef"
             :model-value="protocolParams"
@@ -52,7 +54,7 @@
 
         <el-tab-pane
           v-if="tlsSupportedProtocol"
-          label="加密配置"
+          :label="$t('addDevice.tabSecurity')"
           name="security"
         >
           <DeviceSecurityConfig
@@ -60,6 +62,7 @@
             :model-value="securityConfig"
             :network-mode="mediaType === 'network'"
             :protocol-type="form.protocol_type"
+            :conn-type="form.conn_type"
             :disabled="saving || loadingChannel"
             @certificate-change="(file) => (certificateFile = file)"
             @private-key-change="(file) => (privateKeyFile = file)"
@@ -160,7 +163,11 @@
           min-width="240"
           show-overflow-tooltip
         />
-        <el-table-column prop="go_id" label="GOOSE标识符 (GoID)" width="180" />
+        <el-table-column
+          prop="go_id"
+          :label="$t('addDevice.gooseGoId')"
+          width="180"
+        />
         <el-table-column prop="app_id" label="APPID" width="70" />
         <el-table-column
           prop="dat_set"
@@ -220,7 +227,6 @@ import {
   getChannel,
   updateChannel,
   getSerialPorts,
-  reloadDeviceConfig,
   getProtocolConfig,
   uploadChannelSecurity,
 } from "@/api/channelApi";
@@ -231,6 +237,15 @@ import type {
   PointImportResult,
   SecurityConfig,
 } from "@/types/channel";
+import {
+  normalizeDlt645PointMode,
+  shouldImportDlt645Standard,
+  type Dlt645PointMode,
+} from "@/utils/dlt645PointMode";
+import {
+  getTlsMaterialRequirements,
+  shouldSaveChannelSecurity,
+} from "@/utils/channelEdit";
 
 const props = defineProps<{
   visible: boolean;
@@ -258,7 +273,8 @@ const activeTab = ref<"basic" | "protocol" | "security">("basic");
 const originalName = ref("");
 const mediaType = ref<"serial" | "network">("network");
 const selectedFile = ref<File | null>(null);
-const dlt645PointMode = ref<"standard" | "import">("standard");
+const dlt645PointMode = ref<Dlt645PointMode>("standard");
+const originalDlt645PointMode = ref<Dlt645PointMode>("standard");
 const icdFile = ref<File | null>(null);
 const certificateFile = ref<File | null>(null);
 const privateKeyFile = ref<File | null>(null);
@@ -273,13 +289,17 @@ const protocolParams = reactive({
 });
 const securityConfig = reactive<SecurityConfig>({
   tls_enabled: false,
-  tls_mode: "mutual",
+  tls_mode: "one_way",
   certificate_configured: false,
   certificate_filename: null,
   private_key_configured: false,
   private_key_filename: null,
   ca_certificate_configured: false,
   ca_certificate_filename: null,
+});
+const originalSecuritySettings = ref({
+  tls_enabled: false,
+  tls_mode: "one_way" as SecurityConfig["tls_mode"],
 });
 
 // GOOSE 预览状态
@@ -298,7 +318,7 @@ let channelLoadRequest = 0;
 
 const defaultSecurityConfig = (): SecurityConfig => ({
   tls_enabled: false,
-  tls_mode: "mutual",
+  tls_mode: "one_way",
   certificate_configured: false,
   certificate_filename: null,
   private_key_configured: false,
@@ -311,6 +331,9 @@ const applyPersistedSecurityConfig = (persisted?: SecurityConfig) => {
   const normalized = {
     ...defaultSecurityConfig(),
     ...(persisted || {}),
+    // 兼容旧数据库；basic 已整改为会校验 CA 的单向 TLS。
+    tls_mode:
+      (persisted?.tls_mode as string) === "mutual" ? "mutual" : "one_way",
     // 开关只认后端持久化的布尔值，不根据证书或本地点击状态推断。
     tls_enabled:
       persisted?.tls_enabled === true &&
@@ -360,19 +383,38 @@ const form = reactive<ChannelCreateRequest>({
   rtu_addr: "1",
   group_id: null,
   protocol_params: protocolParams,
+  dlt645_point_mode: "standard",
 });
 
-const rules: FormRules = {
-  code: [
-    { required: true, message: t("addDevice.codeRequired"), trigger: "blur" },
-  ],
-  name: [
-    { required: true, message: t("addDevice.nameRequired"), trigger: "blur" },
-  ],
-  port: [
-    { required: true, message: t("addDevice.portRequired"), trigger: "blur" },
-  ],
-};
+const rules = computed<FormRules>(() => {
+  const base: FormRules = {
+    code: [
+      { required: true, message: t("addDevice.codeRequired"), trigger: "blur" },
+    ],
+    name: [
+      { required: true, message: t("addDevice.nameRequired"), trigger: "blur" },
+    ],
+    port: [
+      { required: true, message: t("addDevice.portRequired"), trigger: "blur" },
+    ],
+  };
+  // DLT645 电表地址必须为 12 位数字
+  if (form.protocol_type === 3) {
+    base.rtu_addr = [
+      {
+        required: true,
+        message: t("addDevice.meterAddressRequired"),
+        trigger: "blur",
+      },
+      {
+        pattern: /^\d{12}$/,
+        message: t("addDevice.meterAddressInvalid"),
+        trigger: "blur",
+      },
+    ];
+  }
+  return base;
+});
 
 // 生命周期与监听
 onMounted(async () => {
@@ -418,6 +460,10 @@ watch(
       securityConfig.tls_enabled = false;
       if (activeTab.value === "security") activeTab.value = "basic";
     }
+    // DLT645 电表地址统一为 12 位数字（补零），避免短地址残留
+    if (protocolType === 3 && !loadingChannel.value) {
+      form.rtu_addr = String(form.rtu_addr || "").padStart(12, "0");
+    }
     if (protocolType === 4 && connType === 2) {
       selectedFile.value = null;
     } else {
@@ -450,9 +496,23 @@ const loadChannelData = async (id: number) => {
     const data = await getChannel(id);
     if (!data || requestId !== channelLoadRequest) return;
     Object.assign(form, data);
+    originalDlt645PointMode.value = normalizeDlt645PointMode(
+      data.dlt645_point_mode,
+    );
+    // DLT645 电表地址回显统一为 12 位数字（兼容历史短地址数据）
+    if (form.protocol_type === 3) {
+      form.rtu_addr = String(form.rtu_addr || "").padStart(12, "0");
+      dlt645PointMode.value = originalDlt645PointMode.value;
+    } else {
+      dlt645PointMode.value = "standard";
+    }
     applyPersistedProtocolParams(data.protocol_params);
     form.protocol_params = protocolParams;
     applyPersistedSecurityConfig(data.security_config);
+    originalSecuritySettings.value = {
+      tls_enabled: securityConfig.tls_enabled,
+      tls_mode: securityConfig.tls_mode,
+    };
     originalName.value = data.name || "";
     mediaType.value =
       data.conn_type === 0 || data.conn_type === 3 ? "serial" : "network";
@@ -468,6 +528,7 @@ const loadChannelData = async (id: number) => {
 
 const resetForm = () => {
   dlt645PointMode.value = "standard";
+  originalDlt645PointMode.value = "standard";
   Object.assign(form, {
     code: "",
     name: "",
@@ -483,9 +544,14 @@ const resetForm = () => {
     rtu_addr: "1",
     group_id: null,
     protocol_params: protocolParams,
+    dlt645_point_mode: "standard",
   });
   applyPersistedProtocolParams();
   applyPersistedSecurityConfig();
+  originalSecuritySettings.value = {
+    tls_enabled: false,
+    tls_mode: "one_way",
+  };
   clearPendingPointFiles();
   goosePreviewData.value = null;
   previewDone.value = false;
@@ -552,21 +618,32 @@ const handleSubmit = async () => {
       securityConfig.private_key_configured || !!privateKeyFile.value;
     const hasCaCertificate =
       securityConfig.ca_certificate_configured || !!caCertificateFile.value;
-    if (
-      !hasCertificate ||
-      !hasPrivateKey ||
-      (securityConfig.tls_mode === "mutual" && !hasCaCertificate)
-    ) {
+    const requirements = getTlsMaterialRequirements(
+      securityConfig.tls_mode,
+      form.conn_type,
+    );
+    const missingIdentity =
+      requirements.identity && (!hasCertificate || !hasPrivateKey);
+    const missingCaCertificate =
+      requirements.caCertificate && !hasCaCertificate;
+    if (missingIdentity || missingCaCertificate) {
       activeTab.value = "security";
-      ElMessage.error(
+      const messageKey =
         securityConfig.tls_mode === "mutual"
-          ? "双向认证 TLS 必须上传本端证书、私钥和 CA 证书"
-          : "启用 TLS 后必须上传证书和私钥",
-      );
+          ? "addDevice.tlsMutualRequired"
+          : form.conn_type === 1
+            ? "addDevice.tlsOneWayCaRequired"
+            : "addDevice.tlsOneWayIdentityRequired";
+      ElMessage.error(t(messageKey));
       return;
     }
   }
   form.protocol_params = protocolParams;
+  // DLT645 电表地址统一为 12 位数字（补零后校验）
+  if (form.protocol_type === 3) {
+    form.rtu_addr = String(form.rtu_addr || "").padStart(12, "0");
+    form.dlt645_point_mode = dlt645PointMode.value;
+  }
   await formRef.value.validate(async (valid) => {
     if (!valid) {
       activeTab.value = "basic";
@@ -579,37 +656,60 @@ const handleSubmit = async () => {
     }, 1000);
     try {
       let resultId: number;
+      const hasNewSecurityFiles = Boolean(
+        certificateFile.value ||
+        privateKeyFile.value ||
+        caCertificateFile.value,
+      );
+      const shouldSaveSecurity = shouldSaveChannelSecurity({
+        isEdit: isEditMode.value,
+        tlsSupported: tlsSupportedProtocol.value,
+        tlsEnabled: securityConfig.tls_enabled,
+        tlsMode: securityConfig.tls_mode,
+        originalTlsEnabled: originalSecuritySettings.value.tls_enabled,
+        originalTlsMode: originalSecuritySettings.value.tls_mode,
+        hasNewFiles: hasNewSecurityFiles,
+      });
 
       // 1. 保存通道
       progressText.value = t("addDevice.savingChannel");
       if (isEditMode.value && props.channelId) {
-        await updateChannel(props.channelId, form);
+        // When TLS also changed, its endpoint performs the single required reload.
+        await updateChannel(props.channelId, form, shouldSaveSecurity);
         resultId = props.channelId;
       } else {
         const createRes = await createChannel(form);
         resultId = createRes.channel_id;
       }
 
-      progressText.value = "正在保存 TLS 配置";
-      const persistedSecurity = await uploadChannelSecurity(
-        resultId,
-        securityConfig.tls_enabled,
-        securityConfig.tls_mode,
-        certificateFile.value,
-        privateKeyFile.value,
-        caCertificateFile.value,
-      );
-      applyPersistedSecurityConfig(persistedSecurity);
-
-      // 2. 编辑模式：重载配置
-      if (isEditMode.value && props.channelId) {
-        progressText.value = t("addDevice.reloadingConfig");
-        await reloadDeviceConfig(props.channelId);
+      // Serial protocols (including DLT645) do not have TLS configuration.
+      if (shouldSaveSecurity) {
+        progressText.value = t("addDevice.savingTlsConfig");
+        const persistedSecurity = await uploadChannelSecurity(
+          resultId,
+          securityConfig.tls_enabled,
+          securityConfig.tls_mode,
+          certificateFile.value,
+          privateKeyFile.value,
+          caCertificateFile.value,
+        );
+        applyPersistedSecurityConfig(persistedSecurity);
+        originalSecuritySettings.value = {
+          tls_enabled: securityConfig.tls_enabled,
+          tls_mode: securityConfig.tls_mode,
+        };
       }
 
-      // 3. Excel 点表导入
-      if (form.protocol_type === 3 && dlt645PointMode.value === "standard") {
-        progressText.value = "正在导入 DL/T645 标准点表";
+      // Only import a point table when one was newly selected.
+      if (
+        form.protocol_type === 3 &&
+        shouldImportDlt645Standard(
+          dlt645PointMode.value,
+          isEditMode.value,
+          originalDlt645PointMode.value,
+        )
+      ) {
+        progressText.value = t("addDevice.importingDlt645");
         await importDlt645StandardPoints(resultId);
       } else if (!isIec61850Server.value && selectedFile.value) {
         progressText.value = t("addDevice.importingPoints");
@@ -625,10 +725,8 @@ const handleSubmit = async () => {
 
       emit("success", form.name, isEditMode.value, originalName.value);
       dialogVisible.value = false;
-      localStorage.setItem("_pendingDevice", form.name);
-      window.location.reload();
     } catch (e: any) {
-      console.error(e.message || "操作失败");
+      console.error(e.message || t("addDevice.operationFailed"));
     } finally {
       if (progressTimer) {
         clearInterval(progressTimer);

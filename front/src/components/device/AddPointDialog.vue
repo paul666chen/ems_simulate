@@ -42,7 +42,10 @@
             style="width: 100%"
           />
         </el-form-item>
-        <el-form-item :label="$t('point.startAddress')" prop="reg_addr">
+        <el-form-item
+          :label="isDnp3 ? $t('point.startIndex') : $t('point.startAddress')"
+          prop="reg_addr"
+        >
           <el-input
             v-model="formData.reg_addr"
             :placeholder="$t('point.startAddrPlaceholder')"
@@ -77,7 +80,10 @@
           />
         </el-form-item>
 
-        <el-form-item :label="$t('point.regAddress')" prop="reg_addr">
+        <el-form-item
+          :label="isDnp3 ? $t('point.index') : $t('point.regAddress')"
+          prop="reg_addr"
+        >
           <el-input
             v-model="formData.reg_addr"
             :placeholder="$t('point.regAddrPlaceholder')"
@@ -86,7 +92,7 @@
       </template>
 
       <el-form-item
-        v-if="!isIec61850 && !isDlt645"
+        v-if="!isIec61850 && !isDlt645 && !isDnp3"
         :label="$t('point.slaveAddress')"
         prop="rtu_addr"
       >
@@ -105,7 +111,7 @@
       </el-form-item>
 
       <el-form-item
-        v-if="!isIec104"
+        v-if="!isIec104 && !isDnp3"
         :label="$t('point.funcCode')"
         prop="func_code"
       >
@@ -124,7 +130,7 @@
       </el-form-item>
 
       <el-form-item
-        v-if="!isIec104"
+        v-if="!isIec104 && !isDnp3"
         :label="$t('point.decodeCode')"
         prop="decode_code"
       >
@@ -329,6 +335,12 @@ const isDlt645 = computed(() => {
   return pt === "Dlt645Client" || pt === "Dlt645Server";
 });
 
+// 判断是否为 DNP3 协议（DNP3 用 index 寻址，无功能码/解析码/从站地址）
+const isDnp3 = computed(() => {
+  const pt = props.protocolType || "";
+  return pt === "Dnp3Client" || pt === "Dnp3Server";
+});
+
 const emit = defineEmits<{
   (e: "update:modelValue", value: boolean): void;
   (e: "success"): void;
@@ -345,11 +357,11 @@ const isBatch = ref(false);
 const batchCount = ref(10);
 
 // 根据测点类型动态计算编码和名称前缀
-const typeNameMap: Record<number, { code: string; name: string }> = {
-  0: { code: "YC_", name: "遥测" },
-  1: { code: "YX_", name: "遥信" },
-  2: { code: "YK_", name: "遥控" },
-  3: { code: "YT_", name: "遥调" },
+const typeNameMap: Record<number, { code: string; nameKey: string }> = {
+  0: { code: "YC_", nameKey: "point.yc" },
+  1: { code: "YX_", nameKey: "point.yx" },
+  2: { code: "YK_", nameKey: "point.yk" },
+  3: { code: "YT_", nameKey: "point.yt" },
 };
 
 // IEC104 各测点类型的起始地址偏移（与后端 IEC104Strategy 一致）
@@ -361,7 +373,7 @@ const iec104AddressOffset: Record<number, number> = {
 };
 
 const codePrefix = ref("YC_");
-const namePrefix = ref("遥测");
+const namePrefix = ref(t("point.yc"));
 
 const formData = reactive<PointCreateData>({
   frame_type: 0,
@@ -403,9 +415,12 @@ const availableIec104Types = computed(() => {
 watch(
   () => formData.frame_type,
   (newType) => {
-    const prefixes = typeNameMap[newType] || { code: "POINT_", name: "测点" };
+    const prefixes = typeNameMap[newType] || {
+      code: "POINT_",
+      nameKey: "point.point",
+    };
     codePrefix.value = prefixes.code;
-    namePrefix.value = prefixes.name;
+    namePrefix.value = t(prefixes.nameKey);
 
     // 遥控 (2) 和 遥调 (3) 默认功能码为 6，遥测 (0) 和 遥信 (1) 默认功能码为 3
     if (newType === 2 || newType === 3) {
@@ -425,14 +440,14 @@ watch(
 // 可用的功能码列表
 const validFuncCodes = computed(() => {
   const allCodes = [
-    { value: 1, label: "01 - 读线圈" },
-    { value: 2, label: "02 - 读离散输入" },
-    { value: 3, label: "03 - 读保持寄存器" },
-    { value: 4, label: "04 - 读输入寄存器" },
-    { value: 5, label: "05 - 写单个线圈" },
-    { value: 6, label: "06 - 写单个寄存器" },
-    { value: 15, label: "15 - 写多个线圈" },
-    { value: 16, label: "16 - 写多个寄存器" },
+    { value: 1, label: t("table.funcCode01") },
+    { value: 2, label: t("table.funcCode02") },
+    { value: 3, label: t("table.funcCode03") },
+    { value: 4, label: t("table.funcCode04") },
+    { value: 5, label: t("table.funcCode05") },
+    { value: 6, label: t("table.funcCode06") },
+    { value: 15, label: t("table.funcCode15") },
+    { value: 16, label: t("table.funcCode16") },
   ];
 
   const type = formData.frame_type;

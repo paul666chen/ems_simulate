@@ -12,11 +12,14 @@ from src.device.core.device import Device
 from src.enums.modbus_def import ProtocolType
 from src.web.api.exceptions import NotFoundError, OperationError, ValidationError
 from src.web.api.schemas import (
+    ApplySimulationConfigRequest,
     BaseResponse,
     DeviceInfoRequest,
     DeviceStartRequest,
     DeviceStopRequest,
     DeviceTableRequest,
+    DLT645CommandRequest,
+    DLT645DiInfoRequest,
     ExportModelRequest,
     IEC61850ImportModelRequest,
     ManualReadRequest,
@@ -69,9 +72,10 @@ async def get_device_info(req: DeviceInfoRequest, request: Request):
         "databits": getattr(device, "databits", 8),
         "stopbits": getattr(device, "stopbits", 1),
         "parity": getattr(device, "parity", "N"),
+        "meter_address": getattr(device, "meter_address", None),
     }
 
-    channels = ChannelDao.get_all_channels()
+    channels = await asyncio.to_thread(ChannelDao.get_all_channels)
     channel = next((c for c in channels if c.get("name") == req.device_name), None)
 
     if channel:
@@ -98,7 +102,8 @@ async def get_slave_id_list(req: DeviceInfoRequest, request: Request):
 async def get_table_by_slave_id(req: DeviceTableRequest, request: Request):
     """获取设备表格数据"""
     device = _get_device(req.device_name, request)
-    table_data, total = device.get_table_data(
+    table_data, total = await asyncio.to_thread(
+        device.get_table_data,
         slave_id=req.slave_id,
         name=req.point_name,
         page_index=req.page_index,
@@ -118,7 +123,8 @@ async def get_table_by_slave_id(req: DeviceTableRequest, request: Request):
 async def start_simulation(req: SimulationStartRequest, request: Request):
     """启动模拟"""
     device = _get_device(req.device_name, request)
-    device.setAllPointSimulateMethod(req.simulate_method)
+    if req.simulate_method is not None:
+        await asyncio.to_thread(device.setAllPointSimulateMethod, req.simulate_method)
     device.startSimulation()
     return BaseResponse(message="启动模拟程序成功!", data=True)
 
@@ -127,8 +133,27 @@ async def start_simulation(req: SimulationStartRequest, request: Request):
 async def stop_simulation(req: SimulationStopRequest, request: Request):
     """停止模拟"""
     device = _get_device(req.device_name, request)
-    device.stopSimulation()
+    await asyncio.to_thread(device.stopSimulation)
     return BaseResponse(message="停止模拟程序成功!", data=True)
+
+
+@device_router.post("/simulation-config", response_model=BaseResponse)
+async def get_simulation_config(req: DeviceInfoRequest, request: Request):
+    """获取整机测点模拟配置（Dialog 回显用）"""
+    device = _get_device(req.device_name, request)
+    configs = await asyncio.to_thread(device.getSimulationConfig)
+    return BaseResponse(message="获取模拟配置成功!", data=configs)
+
+
+@device_router.post("/apply-simulation-config", response_model=BaseResponse)
+async def apply_simulation_config(req: ApplySimulationConfigRequest, request: Request):
+    """批量应用测点模拟配置（是否模拟 + 模拟方式 + 步长）"""
+    device = _get_device(req.device_name, request)
+    result = await asyncio.to_thread(
+        device.applySimulationConfig,
+        [item.model_dump(mode="json") for item in req.points],
+    )
+    return BaseResponse(message="应用模拟配置成功!", data=result)
 
 
 @device_router.post("/start", response_model=BaseResponse)
@@ -196,7 +221,7 @@ async def load_iec61850_model(req: DeviceInfoRequest, request: Request):
     device = _get_device(req.device_name, request)
 
     # 查询数据库中的 icd_path
-    channels = ChannelService.get_all_channels()
+    channels = await asyncio.to_thread(ChannelService.get_all_channels)
     channel = next((c for c in channels if c.get("name") == req.device_name), None)
 
     if not channel:
@@ -338,6 +363,76 @@ async def iec104_interrogation(req: DeviceInfoRequest, request: Request):
     if not success:
         raise OperationError("总召唤失败，请检查设备是否已连接且为 IEC104 客户端", data=False)
     return BaseResponse(message="总召唤已触发，数据同步中!", data=True)
+
+
+@device_router.post("/dlt645-command", response_model=BaseResponse)
+async def send_dlt645_command(req: DLT645CommandRequest, request: Request):
+    """发送 DL/T645 特殊命令（读/写通讯地址、广播校时、冻结、改速率、改密码、清零等）
+
+    主站（Dlt645Client）与从站（Dlt645Server）设备均支持，
+    具体可用命令由 handler 侧按角色分发。
+    """
+    device = _get_device(req.device_name, request)
+    result = await device.send_dlt645_command(req.command, req.params)
+    if not result.get("ok"):
+        message = result.get("message", "DLT645 命令执行失败")
+        log.error(f"设备 {req.device_name} DLT645 命令失败: {message}")
+        raise OperationError(message, data=False)
+    return BaseResponse(
+        message=result.get("message", "命令执行成功"),
+        data=result.get("detail") if result.get("detail") is not None else True,
+    )
+
+
+@device_router.post("/dlt645-di-info", response_model=BaseResponse)
+async def get_dlt645_di_info(req: DLT645DiInfoRequest):
+    """获取 DL/T645 数据标识（DI）的元信息：名称、数据格式、是否列表及子项格式。"""
+    import dlt645  # noqa: F401
+    from dlt645.model.data.define import DIMap
+
+    di_str = req.di.strip()
+    try:
+        di = int(di_str, 16)
+    except ValueError:
+        raise ValidationError("数据标识格式错误，请输入十六进制，如 0x00000000") from None
+    item = DIMap.get(di)
+    if item is None:
+        raise ValidationError(f"数据标识 0x{di:08X} 不存在")
+
+    def _range(it: object) -> tuple:
+        min_v = getattr(it, "min_value", None)
+        max_v = getattr(it, "max_value", None)
+        return min_v, max_v
+
+    if isinstance(item, list):
+        min_v, max_v = _range(item[0])
+        for child in item[1:]:
+            child_min, child_max = _range(child)
+            if child_min is not None:
+                min_v = child_min if min_v is None else min(min_v, child_min)
+            if child_max is not None:
+                max_v = child_max if max_v is None else max(max_v, child_max)
+        info = {
+            "di": f"0x{di:08X}",
+            "name": " / ".join(str(getattr(child, "name", "")) for child in item if getattr(child, "name", "")),
+            "is_list": True,
+            "data_format": None,
+            "list_formats": [getattr(child, "data_format", "") for child in item],
+            "min_value": min_v,
+            "max_value": max_v,
+        }
+    else:
+        min_v, max_v = _range(item)
+        info = {
+            "di": f"0x{di:08X}",
+            "name": str(getattr(item, "name", "")),
+            "is_list": False,
+            "data_format": getattr(item, "data_format", ""),
+            "list_formats": None,
+            "min_value": min_v,
+            "max_value": max_v,
+        }
+    return BaseResponse(data=info)
 
 
 # ===== 报文捕获 =====

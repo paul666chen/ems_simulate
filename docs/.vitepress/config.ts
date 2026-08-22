@@ -47,13 +47,55 @@ export default defineConfig({
                     ]
                 },
                 {
+                    text: '协议支持',
+                    collapsed: false,
+                    items: [
+                        { text: '协议总览', link: '/guide/protocols/' },
+                        {
+                            text: 'Modbus TCP / RTU',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/modbus/' },
+                                { text: '操作指南', link: '/guide/protocols/modbus/operation' },
+                                { text: '报文查看', link: '/guide/protocols/modbus/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'IEC 60870-5-104',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/iec104/' },
+                                { text: '操作指南', link: '/guide/protocols/iec104/operation' },
+                                { text: '报文查看', link: '/guide/protocols/iec104/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'DL/T 645-2007',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/dlt645/' },
+                                { text: '操作指南', link: '/guide/protocols/dlt645/operation' },
+                                { text: '报文查看', link: '/guide/protocols/dlt645/packet-view' }
+                            ]
+                        },
+                        {
+                            text: 'IEC 61850',
+                            collapsed: false,
+                            items: [
+                                { text: '协议介绍', link: '/guide/protocols/iec61850/' },
+                                { text: '操作指南', link: '/guide/protocols/iec61850/operation' },
+                                { text: '报文查看', link: '/guide/protocols/iec61850/packet-view' }
+                            ]
+                        }
+                    ]
+                },
+                {
                     text: '设备模块',
                     collapsed: false,
                     items: [
-                        { text: '协议支持', link: '/guide/device/protocols' },
                         { text: '设备管理', link: '/guide/device/device-management' },
-                        { text: '从机管理', link: '/guide/device/slave-management' },
-                        { text: '报文查看', link: '/guide/device/packet-view' }
+                        { text: '设备复制', link: '/guide/device/device-copy' },
+                        { text: '从机管理', link: '/guide/device/slave-management' }
                     ]
                 },
                 {
@@ -67,6 +109,14 @@ export default defineConfig({
                         { text: '公式使用', link: '/guide/point/formula' },
                         { text: '寄存器解析', link: '/guide/point/register-parsing' },
                         { text: '变化回溯', link: '/guide/point/change-tracking' }
+                    ]
+                },
+                {
+                    text: '数据模拟',
+                    collapsed: false,
+                    items: [
+                        { text: '测点配置', link: '/guide/simulation/point-config' },
+                        { text: '数据监视', link: '/guide/simulation/data-monitor' }
                     ]
                 }
                 // {

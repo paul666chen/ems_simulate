@@ -1,11 +1,14 @@
 """通道管理 - 通道 CRUD 路由"""
 
+import asyncio
+
 from fastapi import APIRouter, Request
 
 from src.config.config import Config
 from src.data.dao.point_dao import PointDao
 from src.data.service.channel_configuration_service import ChannelConfigurationService
 from src.data.service.channel_service import ChannelService
+from src.data.service.device_group_service import DeviceGroupService
 from src.device.protocol.runtime_config import normalize_protocol_params
 from src.enums.modbus_def import ProtocolType
 from src.web.api.channel.helpers import (
@@ -24,6 +27,44 @@ from src.web.log import log
 
 router = APIRouter(tags=["channel"])
 
+_RUNTIME_CHANNEL_FIELDS = (
+    "ip",
+    "port",
+    "com_port",
+    "baud_rate",
+    "data_bits",
+    "stop_bits",
+    "parity",
+    "rtu_addr",
+    "model_name",
+)
+
+
+def _runtime_configuration_changed(
+    existing: dict,
+    req: ChannelUpdateRequest,
+    normalized_params: dict | None,
+    existing_params: dict | None,
+) -> bool:
+    """Return whether an edit requires replacing the in-memory device."""
+    protocol_type = req.protocol_type if req.protocol_type is not None else existing.get("protocol_type", 1)
+    conn_type = req.conn_type if req.conn_type is not None else existing.get("conn_type", 1)
+    if protocol_type != existing.get("protocol_type", 1) or conn_type != existing.get("conn_type", 1):
+        return True
+
+    for field in _RUNTIME_CHANNEL_FIELDS:
+        value = getattr(req, field)
+        if value is None:
+            continue
+        old_value = existing.get(field)
+        if field == "rtu_addr":
+            if str(value) != str(old_value):
+                return True
+        elif value != old_value:
+            return True
+
+    return normalized_params is not None and normalized_params != existing_params
+
 
 # 协议类型映射
 PROTOCOL_OPTIONS = [
@@ -32,6 +73,7 @@ PROTOCOL_OPTIONS = [
     {"value": 2, "label": "IEC 104", "conn_types": [1, 2]},
     {"value": 3, "label": "DL/T645-2007", "conn_types": [0, 1, 2, 3]},
     {"value": 4, "label": "IEC 61850", "conn_types": [1, 2]},
+    {"value": 5, "label": "DNP3", "conn_types": [1, 2]},
 ]
 
 # 连接类型映射
@@ -51,6 +93,46 @@ def _validate_protocol_connection(protocol_type: int, conn_type: int) -> None:
         raise ValidationError(f"协议 {option['label']} 不支持连接类型 {conn_type}")
 
 
+def _server_ip_conflicts(ip_a: str | None, ip_b: str | None) -> bool:
+    """判断两个服务端 IP 是否互相冲突。
+
+    0.0.0.0（或空值）表示监听所有 IP，与任何具体 IP 同端口都会冲突；
+    否则仅相同 IP 才冲突（如 192.168.0.1 与 192.168.0.2 不冲突）。
+    """
+    a = (ip_a or "").strip()
+    b = (ip_b or "").strip()
+    if a in ("0.0.0.0", "") or b in ("0.0.0.0", ""):
+        return True
+    return a == b
+
+
+def _validate_server_endpoint_unique(
+    ip: str | None,
+    port: int | None,
+    exclude_channel_id: int | None = None,
+) -> None:
+    """校验 TCP 服务端 IP+端口 组合唯一。
+
+    TCP 服务端（conn_type=2）的唯一标识是 IP+端口，而非端口号本身；
+    其中 0.0.0.0 表示监听所有 IP，与任何具体 IP 的同端口均冲突。
+    exclude_channel_id 用于编辑场景排除自身。
+    """
+    if port is None:
+        return
+    for ch in ChannelService.get_all_channels():
+        if ch.get("conn_type") != 2:
+            continue
+        if exclude_channel_id is not None and ch.get("id") == exclude_channel_id:
+            continue
+        if str(ch.get("port") or "") != str(port):
+            continue
+        if not _server_ip_conflicts(ch.get("ip"), ip):
+            continue
+        raise ValidationError(
+            f"服务端地址 {ip or '未指定IP'}:{port} 已被设备 '{ch.get('name')}' 占用，请使用其他 IP 或端口"
+        )
+
+
 @router.post("/protocols", response_model=BaseResponse)
 async def get_protocols():
     """获取支持的协议列表"""
@@ -65,7 +147,7 @@ async def get_serial_ports():
     """获取可用的串口列表"""
     from src.tools.serial_port_detector import SerialPortDetector
 
-    ports = SerialPortDetector.get_available_ports()
+    ports = await asyncio.to_thread(SerialPortDetector.get_available_ports)
     return BaseResponse(message="获取串口列表成功", data=ports)
 
 
@@ -74,15 +156,12 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
     """创建通道/设备"""
     _validate_protocol_connection(req.protocol_type, req.conn_type)
 
-    existing = ChannelService.get_channel_by_code(req.code)
+    existing = await asyncio.to_thread(ChannelService.get_channel_by_code, req.code)
     if existing:
         raise ValidationError(f"设备编码 '{req.code}' 已存在，请使用其他编码")
 
     if req.conn_type == 2:
-        all_channels = ChannelService.get_all_channels()
-        for ch in all_channels:
-            if ch.get("conn_type") == 2 and ch.get("port") == req.port:
-                raise ValidationError(f"端口 {req.port} 已被设备 '{ch.get('name')}' 占用，请使用其他端口")
+        _validate_server_endpoint_unique(req.ip, req.port)
 
     params = req.protocol_params
     try:
@@ -94,23 +173,15 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
 
-    from src.data.service.device_service import DeviceService
-
-    device_id = DeviceService.create_device(
+    device_id, channel_id = await asyncio.to_thread(
+        ChannelService.provision_channel,
         code=req.code,
         name=req.name,
-        device_type=0,
         group_id=req.group_id,
-    )
-    if device_id <= 0:
-        raise OperationError("创建设备记录失败")
-
-    channel_id = ChannelService.create_channel(
-        code=req.code,
-        name=req.name,
-        device_id=device_id,
         protocol_type=req.protocol_type,
         conn_type=req.conn_type,
+        protocol_params=params.values if params else None,
+        protocol_schema_version=params.schema_version if params else 1,
         ip=req.ip,
         port=req.port,
         com_port=req.com_port,
@@ -119,18 +190,8 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
         stop_bits=req.stop_bits,
         parity=req.parity,
         rtu_addr=req.rtu_addr if req.protocol_type == 3 else "1",
+        dlt645_point_mode=req.dlt645_point_mode if req.protocol_type == 3 else "import",
         model_name=req.model_name if req.protocol_type == 4 else None,
-    )
-
-    if channel_id <= 0:
-        raise OperationError("创建通道失败")
-
-    ChannelConfigurationService.save_protocol_params(
-        channel_id,
-        req.protocol_type,
-        req.conn_type,
-        params.values if params else None,
-        params.schema_version if params else 1,
     )
 
     try:
@@ -154,6 +215,7 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
                 ProtocolType.Iec104Client,
                 ProtocolType.Dlt645Client,
                 ProtocolType.Iec61850Client,
+                ProtocolType.Dnp3Client,
             ]:
                 builder.setDeviceNetConfig(port=req.port, ip=req.ip)
             else:
@@ -164,12 +226,21 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
             if req.model_name:
                 builder.setDeviceModelName(req.model_name)
 
-        builder.setDeviceRuntimeConfig(
-            ChannelConfigurationService.get_protocol_params(channel_id, req.protocol_type, req.conn_type)["values"]
+        runtime_config = await asyncio.to_thread(
+            ChannelConfigurationService.get_protocol_params,
+            channel_id,
+            req.protocol_type,
+            req.conn_type,
         )
-        builder.setDeviceSecurityConfig(ChannelConfigurationService.get_runtime_security(channel_id))
+        builder.setDeviceRuntimeConfig(runtime_config["values"])
+        security_config = await asyncio.to_thread(
+            ChannelConfigurationService.get_runtime_security,
+            channel_id,
+        )
+        builder.setDeviceSecurityConfig(security_config)
 
-        new_device = builder.makeGeneralDevice(
+        new_device = await asyncio.to_thread(
+            builder.makeGeneralDevice,
             device_id=channel_id,
             device_name=req.name,
             protocol_type=protocol_enum,
@@ -193,8 +264,8 @@ async def delete_channel(req: ChannelDeleteRequest, request: Request):
     """删除通道"""
     device_controller = request.app.state.device_controller
     await device_controller.remove_device_by_id(req.channel_id)
-    ChannelConfigurationService.delete_for_channel(req.channel_id)
-    success = ChannelService.delete_channel(req.channel_id)
+    await asyncio.to_thread(ChannelConfigurationService.delete_for_channel, req.channel_id)
+    success = await asyncio.to_thread(ChannelService.delete_channel, req.channel_id)
     if not success:
         raise NotFoundError("通道不存在", data=False)
     return BaseResponse(message="删除通道成功", data=True)
@@ -203,21 +274,25 @@ async def delete_channel(req: ChannelDeleteRequest, request: Request):
 @router.post("/list", response_model=BaseResponse)
 async def get_channel_list():
     """获取所有通道列表"""
-    channels = ChannelService.get_all_channels()
+    channels = await asyncio.to_thread(ChannelService.get_all_channels)
     return BaseResponse(message="获取通道列表成功", data=channels)
 
 
 @router.post("/detail", response_model=BaseResponse)
 async def get_channel_by_id(req: ChannelDetailRequest):
     """获取单个通道详情"""
-    channel = ChannelService.get_channel_by_id(req.channel_id)
+    channel = await asyncio.to_thread(ChannelService.get_channel_by_id, req.channel_id)
     if channel:
-        channel["protocol_params"] = ChannelConfigurationService.get_protocol_params(
+        channel["protocol_params"] = await asyncio.to_thread(
+            ChannelConfigurationService.get_protocol_params,
             req.channel_id,
             channel.get("protocol_type", 1),
             channel.get("conn_type", 1),
         )
-        channel["security_config"] = ChannelConfigurationService.get_security_config(req.channel_id)
+        channel["security_config"] = await asyncio.to_thread(
+            ChannelConfigurationService.get_security_config,
+            req.channel_id,
+        )
     if not channel:
         raise NotFoundError("通道不存在")
     return BaseResponse(message="获取通道详情成功", data=channel)
@@ -227,17 +302,20 @@ async def get_channel_by_id(req: ChannelDetailRequest):
 async def update_channel(req: ChannelUpdateRequest, request: Request):
     """更新通道配置"""
     channel_id = req.channel_id
-    existing = ChannelService.get_channel_by_id(channel_id)
+    existing = await asyncio.to_thread(ChannelService.get_channel_by_id, channel_id)
     if not existing:
         raise NotFoundError("通道不存在")
 
     protocol_to_use = req.protocol_type if req.protocol_type is not None else existing.get("protocol_type", 1)
     conn_type_to_use = req.conn_type if req.conn_type is not None else existing.get("conn_type", 1)
+    dlt645_point_mode_to_use = (
+        req.dlt645_point_mode if req.dlt645_point_mode is not None else existing.get("dlt645_point_mode", "import")
+    )
     _validate_protocol_connection(protocol_to_use, conn_type_to_use)
 
     old_protocol = existing.get("protocol_type", 1)
     if protocol_to_use != old_protocol:
-        point_count = PointDao.count_points_by_channel(channel_id)
+        point_count = await asyncio.to_thread(PointDao.count_points_by_channel, channel_id)
         has_iec61850_model = bool(existing.get("icd_path") or existing.get("model_name"))
         if point_count or has_iec61850_model:
             raise ConflictError(
@@ -246,46 +324,125 @@ async def update_channel(req: ChannelUpdateRequest, request: Request):
             )
 
     params = req.protocol_params
+    normalized_params = None
+    existing_params = None
     protocol_combination_changed = protocol_to_use != existing.get(
         "protocol_type", 1
     ) or conn_type_to_use != existing.get("conn_type", 1)
     if params is not None:
         try:
-            normalize_protocol_params(protocol_to_use, conn_type_to_use, params.values)
+            normalized_params = normalize_protocol_params(protocol_to_use, conn_type_to_use, params.values)
         except ValueError as exc:
             raise ValidationError(str(exc)) from exc
+        current_protocol_params = await asyncio.to_thread(
+            ChannelConfigurationService.get_protocol_params,
+            channel_id,
+            existing.get("protocol_type", 1),
+            existing.get("conn_type", 1),
+        )
+        existing_params = current_protocol_params["values"]
 
-    success = ChannelService.update_channel(
-        channel_id=channel_id,
-        name=req.name,
-        protocol_type=req.protocol_type,
-        conn_type=req.conn_type,
-        ip=req.ip,
-        port=req.port,
-        com_port=req.com_port,
-        baud_rate=req.baud_rate,
-        data_bits=req.data_bits,
-        stop_bits=req.stop_bits,
-        parity=req.parity,
-        rtu_addr=req.rtu_addr if protocol_to_use == 3 else "1",
-        model_name=req.model_name if protocol_to_use == 4 else None,
+    runtime_configuration_changed = _runtime_configuration_changed(
+        existing,
+        req,
+        normalized_params,
+        existing_params,
     )
+
+    requested_updates = {
+        field: value
+        for field in (
+            "name",
+            "protocol_type",
+            "conn_type",
+            "ip",
+            "port",
+            "com_port",
+            "baud_rate",
+            "data_bits",
+            "stop_bits",
+            "parity",
+        )
+        if (value := getattr(req, field)) is not None
+    }
+    if protocol_to_use == 3:
+        if req.rtu_addr is not None:
+            requested_updates["rtu_addr"] = req.rtu_addr
+        requested_updates["dlt645_point_mode"] = dlt645_point_mode_to_use
+    else:
+        if protocol_combination_changed:
+            requested_updates["rtu_addr"] = "1"
+        requested_updates["dlt645_point_mode"] = "import"
+    if protocol_to_use == 4:
+        if req.model_name is not None:
+            requested_updates["model_name"] = req.model_name
+    elif protocol_combination_changed:
+        requested_updates["model_name"] = None
+
+    # TCP 服务端唯一性检测：IP+端口 组合唯一（排除自身），须在写库前完成
+    if conn_type_to_use == 2:
+        new_ip = req.ip if req.ip is not None else existing.get("ip")
+        new_port = req.port if req.port is not None else existing.get("port")
+        _validate_server_endpoint_unique(new_ip, new_port, exclude_channel_id=channel_id)
+
+    # 设备分组变更：group_id 存储在 Device 表，由 DeviceGroupService 统一更新。
+    # 注意：移动分组与下方通道更新不在同一事务，任一步失败都会留下部分更新，
+    # 因此移动失败时直接报错中断，避免通道已更新而分组未生效。
+    if "group_id" in req.model_fields_set and req.group_id != existing.get("group_id"):
+        if req.group_id is not None and not DeviceGroupService.get_group_by_id(req.group_id):
+            raise ValidationError(f"目标设备组 {req.group_id} 不存在")
+        device_id = existing.get("device_id")
+        if device_id is not None:
+            moved = await asyncio.to_thread(
+                DeviceGroupService.move_devices_to_group,
+                [device_id],
+                req.group_id,
+            )
+            if moved != 1:
+                raise OperationError("更新设备分组失败", data=False)
+
+    channel_updates = {
+        field: value
+        for field, value in requested_updates.items()
+        if (str(value) != str(existing.get(field)) if field == "rtu_addr" else value != existing.get(field))
+    }
+    success = True
+    if channel_updates:
+        success = await asyncio.to_thread(
+            ChannelService.update_channel,
+            channel_id=channel_id,
+            **channel_updates,
+        )
 
     if not success:
         raise OperationError("更新通道失败", data=False)
 
-    if params is not None or protocol_combination_changed:
-        ChannelConfigurationService.save_protocol_params(
+    protocol_params_changed = normalized_params is not None and normalized_params != existing_params
+    if protocol_params_changed or protocol_combination_changed:
+        await asyncio.to_thread(
+            ChannelConfigurationService.save_protocol_params,
             channel_id,
             protocol_to_use,
             conn_type_to_use,
-            params.values if params else None,
+            normalized_params if params else None,
             params.schema_version if params else 1,
         )
 
     try:
         device_controller = request.app.state.device_controller
-        await reload_device_instance(device_controller, channel_id, is_start=False)
+        if runtime_configuration_changed and not req.defer_runtime_reload:
+            old_device = device_controller.get_device_by_id(channel_id)
+            was_running = bool(old_device and old_device.is_protocol_running())
+            await reload_device_instance(device_controller, channel_id, is_start=was_running)
+        elif "name" in channel_updates:
+            # A display-name-only edit does not require rebuilding the protocol stack.
+            device = device_controller.get_device_by_id(channel_id)
+            if device is not None:
+                old_keys = [key for key, value in device_controller.device_map.items() if value is device]
+                for key in old_keys:
+                    device_controller.device_map.pop(key, None)
+                device.name = req.name
+                device_controller.device_map[req.name] = device
     except Exception as e:
-        log.error(f"更新配置后重载设备失败: {e}")
+        log.error(f"更新配置后同步运行时设备失败: {e}")
     return BaseResponse(message="更新通道成功", data=True)

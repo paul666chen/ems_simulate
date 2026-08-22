@@ -22,6 +22,7 @@ export const CHANNEL_API = {
   RESTART: "/api/channels/restart",
   RELOAD_CONFIG: "/api/channels/reload-config",
   COPY: "/api/channels/copy",
+  COPY_SINGLE: "/api/channels/copy-single",
   IEC61850_STRUCTURE: "/api/channels/iec61850-structure",
   IEC61850_READ_POINTS: "/api/channels/iec61850-read-points",
   IEC61850_TABLE_DATA: "/api/channels/iec61850-table-data",
@@ -47,6 +48,8 @@ export const DEVICE_API = {
   INFO: "/api/devices/info",
   START_SIMULATION: "/api/devices/start-simulation",
   STOP_SIMULATION: "/api/devices/stop-simulation",
+  SIMULATION_CONFIG: "/api/devices/simulation-config",
+  APPLY_SIMULATION_CONFIG: "/api/devices/apply-simulation-config",
   START: "/api/devices/start",
   STOP: "/api/devices/stop",
   SLAVE_ID_LIST: "/api/devices/slave-id-list",
@@ -70,6 +73,8 @@ export const DEVICE_API = {
   DELETE_SLAVE: "/api/devices/delete-slave",
   EDIT_SLAVE: "/api/devices/edit-slave",
   IEC104_INTERROGATION: "/api/devices/iec104-interrogation",
+  DLT645_COMMAND: "/api/devices/dlt645-command",
+  DLT645_DI_INFO: "/api/devices/dlt645-di-info",
 } as const;
 
 // ===== 设备组相关 =====
@@ -97,6 +102,7 @@ export const POINT_API = {
   EDIT_LIMIT: "/api/points/edit-limit",
   GET_LIMIT: "/api/points/get-limit",
   INFO: "/api/points/info",
+  BATCH_VALUES: "/api/points/batch-values",
   SET_SIMULATE_METHOD: "/api/points/set-simulate-method",
   SET_SIMULATE_STEP: "/api/points/set-simulate-step",
   SET_SIMULATION_RANGE: "/api/points/set-simulation-range",

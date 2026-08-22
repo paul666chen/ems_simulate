@@ -1,6 +1,5 @@
 """IEC 61850 服务端报告触发配置回归测试。"""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 from src.proto.iec61850.defs.types import RCBInfo, ReportDataEntry
@@ -9,21 +8,66 @@ from src.proto.iec61850.plugins.reports import ReportsPlugin
 from src.proto.iec61850.plugins.reports import callback as report_callback_module
 from src.proto.iec61850.plugins.reports import manager as report_manager_module
 from src.proto.iec61850.plugins.reports.urcb import UrcbHandler
+from src.proto.iec61850.plugins.scl.parser.type_resolver import TypeResolver
 from src.proto.iec61850.plugins.scl.service.import_service import SclImportService
+
+_TRIGGER_SCL = """
+<SCL>
+  <Header nameStructure="IEDName" />
+  <IED name="PCS001"><AccessPoint name="AP1"><Server>
+    <LDevice inst="LD0"><LN0 lnClass="LLN0" lnType="Lln0Type">
+      <DataSet name="dsDin" />
+      <ReportControl datSet="dsDin" name="brcbDin" rptID="LD0/LLN0$BR$brcbDin"
+                     bufTime="100" confRev="1" buffered="true">
+        <TrgOps period="true" dchg="true" qchg="true" />
+        <RptEnabled max="12" />
+      </ReportControl>
+    </LN0></LDevice>
+    <LDevice inst="CTRL"><LN0 lnClass="LLN0" lnType="Lln0Type" />
+      <LN prefix="kr" lnClass="GGIO" inst="1" lnType="AlarmType" />
+    </LDevice>
+    <LDevice inst="MEAS"><LN0 lnClass="LLN0" lnType="Lln0Type" />
+      <LN lnClass="GGIO" inst="1" lnType="MeasureType" />
+    </LDevice>
+  </Server></AccessPoint></IED>
+  <DataTypeTemplates>
+    <LNodeType id="Lln0Type" lnClass="LLN0" />
+    <LNodeType id="AlarmType" lnClass="GGIO"><DO name="Alm1" type="SpsType" /></LNodeType>
+    <LNodeType id="MeasureType" lnClass="GGIO"><DO name="AnIn1" type="MvType" /></LNodeType>
+    <DOType id="SpsType" cdc="SPS">
+      <DA name="stVal" fc="ST" bType="BOOLEAN" dchg="true" />
+      <DA name="q" fc="ST" bType="Quality" qchg="true" />
+      <DA name="t" fc="ST" bType="Timestamp" />
+    </DOType>
+    <DOType id="MvType" cdc="MV">
+      <DA name="mag" fc="MX" bType="Struct" type="AnalogueValue" dchg="true" />
+      <DA name="q" fc="MX" bType="Quality" qchg="true" />
+    </DOType>
+    <DAType id="AnalogueValue"><BDA name="i" bType="INT32" /></DAType>
+  </DataTypeTemplates>
+</SCL>
+"""
 
 
 def test_scl_da_trigger_flags_are_preserved_in_points():
-    icd_path = Path(__file__).parents[4] / "data" / "device" / "IEC61850SERVER" / "SY_ES630K.icd"
+    result = SclImportService().import_string(_TRIGGER_SCL)
 
-    result = SclImportService().import_file(str(icd_path))
+    st_val = next(point for point in result.points.yx_points if point.reg_addr == "PCS001CTRL/krGGIO1.Alm1.stVal")
+    analog = next(point for point in result.points.yc_points if point.reg_addr == "PCS001MEAS/GGIO1.AnIn1.mag.i")
 
-    st_val = next(point for point in result.points.yx_points if point.reg_addr == "CTRL/krGGIO1.Alm1.stVal")
-    quality = next(point for point in result.points.yx_points if point.reg_addr == "CTRL/krGGIO1.Alm1.q")
-    analog = next(point for point in result.points.yc_points if point.reg_addr == "MEAS/GGIO1.AnIn1.mag.f")
+    ctrl_ld = next(ld for ld in result.doc.get_all_ldevices() if ld.inst == "PCS001CTRL")
+    kr_ggio = next(ln for ln in ctrl_ld.lns if ln.ln_name == "krGGIO1")
+    ln_type = result.doc.get_ln_node_type(kr_ggio.ln_type)
+    alm1 = next(do for do in ln_type.dos if do.name == "Alm1")
+    do_type = result.doc.get_do_type(alm1.type_id)
+    quality = next(
+        da for da in TypeResolver(result.doc).collect_all_das(alm1.type_id, do_type.cdc) if da["path"] == "q"
+    )
 
     assert st_val.dchg is True
-    assert quality.qchg is True
+    assert quality["qchg"] is True
     assert analog.dchg is True
+    assert not any(point.reg_addr.endswith(".q") for point in result.points.yx_points)
 
 
 def test_server_rcb_always_exposes_gi_capability(monkeypatch):
@@ -61,13 +105,11 @@ def test_server_rcb_always_exposes_gi_capability(monkeypatch):
 
 
 def test_expanded_report_instances_have_unique_rpt_ids():
-    icd_path = Path(__file__).parents[4] / "data" / "device" / "IEC61850SERVER" / "SY_ES630K.icd"
-
-    result = SclImportService().import_file(str(icd_path))
+    result = SclImportService().import_string(_TRIGGER_SCL)
     instances = [
         report
         for report in result.reports.report_controls
-        if report.ld_inst == "LD0" and report.name.startswith("brcbDin")
+        if report.ld_inst == "PCS001LD0" and report.name.startswith("brcbDin")
     ]
 
     assert [report.name for report in instances] == [f"brcbDin{idx:02d}" for idx in range(1, 13)]

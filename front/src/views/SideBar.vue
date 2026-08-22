@@ -33,6 +33,10 @@
         @edit-device="handleEditDevice"
         @delete-device="handleDeleteDevice"
         @copy-device="handleCopyDevice"
+        @device-drop="handleDeviceDrop"
+        @group-drop="handleGroupDrop"
+        @group-drop-top="handleGroupDropToTop"
+        @device-drop-top="handleDeviceDropUngrouped"
       />
 
       <!-- 4. 未分组设备 -->
@@ -50,6 +54,7 @@
         @group-command="handleUngroupedCommand"
         @copy-device="handleCopyDeviceByName"
         @node-click="handleUngroupedNodeClick"
+        @device-drop-ungrouped="handleDeviceDropUngrouped"
       />
     </el-scrollbar>
 
@@ -96,6 +101,7 @@
     v-model:visible="copyDeviceDialogVisible"
     :channel-id="copyingChannelId || 0"
     :device-name="copyingDeviceName"
+    :device-code="copyingDeviceCode"
     :device-ip="copyingDeviceIp"
     :device-port="copyingDevicePort"
     :point-count="copyingPointCount"
@@ -111,10 +117,20 @@
 
 <script lang="ts" setup>
 import { useI18n } from "vue-i18n";
-import { onMounted, onUnmounted, ref, computed, watch, nextTick } from "vue";
+import {
+  onMounted,
+  onUnmounted,
+  ref,
+  computed,
+  watch,
+  nextTick,
+  h,
+  type Component,
+} from "vue";
 import { useRouter } from "vue-router";
-import { ElMessage, ElMessageBox } from "element-plus";
+import { ElMessage, ElMessageBox, ElIcon } from "element-plus";
 import type { ElTree, ElScrollbar } from "element-plus";
+import { Right, Cpu, Folder } from "@element-plus/icons-vue";
 
 import SideNavHeader from "@/components/layout/SideNavHeader.vue";
 import SideNavActions from "@/components/layout/SideNavActions.vue";
@@ -138,6 +154,8 @@ import {
   getDeviceGroupTree,
   deleteDeviceGroup,
   batchDeviceOperation,
+  moveDevicesToGroup,
+  updateDeviceGroup,
   type DeviceGroupTreeNode,
   type DeviceInfo,
 } from "@/api/deviceGroupApi";
@@ -214,6 +232,7 @@ const parentGroupIdForNewGroup = ref<number | null>(null);
 const copyDeviceDialogVisible = ref(false);
 const copyingChannelId = ref<number | null>(null);
 const copyingDeviceName = ref<string>("");
+const copyingDeviceCode = ref<string>("");
 const copyingDeviceIp = ref<string>("");
 const copyingDevicePort = ref<number>(502);
 const copyingPointCount = ref<number>(0);
@@ -370,7 +389,7 @@ const fetchDeviceGroupTree = async () => {
           const channel = channels.find((item) => item.name === node.name);
           if (channel?.protocol_type === 3) {
             node.isDlt645 = true;
-            node.children = buildDlt645Children(node.name);
+            node.children = buildDlt645Children(node.name, "device", t);
             continue;
           }
         }
@@ -387,7 +406,7 @@ const fetchDeviceGroupTree = async () => {
         )
         .map((device) => [
           device.name,
-          buildDlt645Children(device.name, "ungrouped"),
+          buildDlt645Children(device.name, "ungrouped", t),
         ]),
     );
     treeKey.value++;
@@ -521,8 +540,9 @@ const navigateToDevice = (
     currentNodeKey.value = treeNode.nodeKey;
   }
 
-  if (forceRefresh) {
-  }
+  // Remount only the current device view after an edit. This replaces the
+  // previous full-page reload while still refreshing the displayed data.
+  if (forceRefresh) query._refresh = String(Date.now());
   router.push({
     path,
     query: Object.keys(query).length > 0 ? query : undefined,
@@ -568,8 +588,57 @@ const handleUngroupedCommand = async (command: string) => {
     },
     startAll: () => handleBatchOperation(0, "start"),
     stopAll: () => handleBatchOperation(0, "stop"),
+    deleteAllDevices: () => handleDeleteAllUngroupedDevices(),
   };
   actions[command]?.();
+};
+
+/** 删除全部未分组设备（含通道与测点数据），与分组设备的级联删除保持一致 */
+const handleDeleteAllUngroupedDevices = async () => {
+  if (!ungroupedDevices.value.length) return;
+  await ElMessageBox.confirm(
+    t("sidebar.confirmDeleteAllUngroupedDevices"),
+    t("sidebar.deleteAllDevicesTitle"),
+    {
+      confirmButtonText: t("sidebar.confirmCascadeDelete"),
+      cancelButtonText: t("common.cancel"),
+      type: "error",
+      confirmButtonClass: "el-button--danger",
+    },
+  );
+  const channels = await getChannelList();
+  const deviceNames = ungroupedDevices.value.map((d) => d.name);
+  for (const deviceName of deviceNames) {
+    const channel = channels.find((c) => c.name === deviceName);
+    if (channel) {
+      await deleteChannel(channel.id);
+    }
+    // 关闭设备标签页并移除动态路由
+    const path = `/device/${deviceName}`;
+    const targetView = visitedViews.value.find((v) => v.path === path);
+    if (targetView) {
+      await delView(targetView);
+    }
+    if (menuRouter.hasRoute(deviceName)) {
+      menuRouter.removeRoute(deviceName);
+    }
+  }
+  if (
+    currentDeviceName.value &&
+    deviceNames.includes(currentDeviceName.value)
+  ) {
+    currentDeviceName.value = "";
+    currentNodeKey.value = "";
+    localStorage.removeItem("activeRoute");
+    const latestView = visitedViews.value.slice(-1)[0];
+    if (latestView) {
+      router.push(latestView.path as string);
+    } else {
+      router.push("/");
+    }
+  }
+  ElMessage.success(t("sidebar.deleteSuccess"));
+  await fetchDeviceGroupTree();
 };
 
 const handleBatchOperation = async (
@@ -674,6 +743,7 @@ const handleCopyDeviceByName = async (
     if (channel) {
       copyingChannelId.value = channel.id;
       copyingDeviceName.value = channel.name;
+      copyingDeviceCode.value = channel.code;
       copyingDeviceIp.value = channel.ip || "0.0.0.0";
       copyingDevicePort.value = channel.port || 502;
       copyingPointCount.value = 0;
@@ -690,6 +760,7 @@ const handleCopyDeviceByName = async (
 
 const handleCopyDeviceClose = () => {
   copyingChannelId.value = null;
+  copyingDeviceCode.value = "";
   copyingProtocolType.value = -1;
   copyingModelName.value = "";
   copyingModelPath.value = "";
@@ -705,13 +776,14 @@ const handleDeviceAdded = async (
   isEdit?: boolean,
   oldName?: string,
 ) => {
-  if (isEdit && oldName && oldName !== deviceName)
-    menuRouter.removeRoute(oldName);
-  menuRouter.addRoute({
-    path: `/device/${deviceName}`,
-    name: deviceName,
-    component: () => import("@/views/Device.vue"),
-  });
+  // Device pages are handled by the static `/device/:deviceName` route.
+  // Remove legacy literal routes because they match the URL without creating
+  // `route.params.deviceName`, causing all polling requests to send an empty body.
+  for (const routeName of new Set([oldName, deviceName])) {
+    if (routeName && menuRouter.hasRoute(routeName)) {
+      menuRouter.removeRoute(routeName);
+    }
+  }
   await fetchDeviceGroupTree();
 
   // 自动展开新设备所在的分组
@@ -772,6 +844,235 @@ const scrollToCurrentDevice = () => {
 
   if (target) {
     target.scrollIntoView({ block: "center", behavior: "smooth" });
+  }
+};
+
+// ========== 拖拽修改设备分组 ==========
+
+/** 在树数据中按 id 查找分组/设备名称（用于成功提示） */
+const findNodeName = (id: number): string => {
+  const search = (nodes: TreeNode[]): string => {
+    for (const node of nodes) {
+      if (node.id === id) return node.name || node.label || "";
+      if (node.children) {
+        const found = search(node.children);
+        if (found) return found;
+      }
+    }
+    return "";
+  };
+  const name = search(treeData.value);
+  if (name) return name;
+  // 未分组设备不在 treeData 中，回退到未分组设备列表查找
+  const ungrouped = ungroupedDevices.value.find((d) => d.id === id);
+  return ungrouped ? ungrouped.name : "";
+};
+
+/** 查找设备当前所在分组 id（未分组返回 null） */
+const findDeviceGroupId = (deviceId: number): number | null => {
+  const search = (nodes: TreeNode[]): number | null => {
+    for (const node of nodes) {
+      if (!node.isGroup) {
+        if (node.id === deviceId) return node.groupId ?? null;
+        continue;
+      }
+      if (node.children) {
+        const found = search(node.children);
+        if (found !== null) return found;
+      }
+    }
+    return null;
+  };
+  return search(treeData.value);
+};
+
+/** 查找分组当前父分组 id（顶级返回 null） */
+const findParentGroupId = (groupId: number): number | null => {
+  const search = (
+    nodes: TreeNode[],
+    parentId: number | null,
+  ): number | null => {
+    for (const node of nodes) {
+      if (!node.isGroup) continue;
+      if (node.id === groupId) return parentId;
+      const found = search(node.children || [], node.id);
+      if (found !== null) return found;
+    }
+    return null;
+  };
+  return search(treeData.value, null);
+};
+
+/** 分组/设备当前所在位置名称（顶级分组显示"顶级"，设备未分组显示"未分组"） */
+const getCurrentLocationName = (
+  groupId: number | null,
+  isDevice: boolean,
+): string => {
+  if (groupId === null) {
+    return isDevice ? t("sidebar.ungroupedTarget") : t("sidebar.topLevelGroup");
+  }
+  return findNodeName(groupId);
+};
+
+/**
+ * 弹出移动确认框：展示 原分组 → 新分组，中间为箭头。
+ * 用户确认后 resolve，取消/关闭时 reject（error 为 "cancel"/"close"）。
+ */
+const confirmMove = (
+  title: string,
+  summary: string,
+  fromName: string,
+  toName: string,
+  icon: Component,
+): Promise<unknown> => {
+  const content = h("div", { class: "move-confirm" }, [
+    h("div", { class: "move-confirm__summary" }, [
+      h(
+        ElIcon,
+        { class: "move-confirm__icon", size: 16 },
+        { default: () => h(icon) },
+      ),
+      h("span", summary),
+    ]),
+    h("div", { class: "move-confirm__path" }, [
+      h("div", { class: "move-node move-node--from" }, [
+        h("div", { class: "move-node__label" }, t("sidebar.originalGroup")),
+        h("div", { class: "move-node__value" }, fromName),
+      ]),
+      h("div", { class: "move-node__arrow" }, [
+        h(ElIcon, { size: 24 }, { default: () => h(Right) }),
+      ]),
+      h("div", { class: "move-node move-node--to" }, [
+        h("div", { class: "move-node__label" }, t("sidebar.newGroup")),
+        h("div", { class: "move-node__value" }, toName),
+      ]),
+    ]),
+  ]);
+  return ElMessageBox.confirm(content, title, {
+    confirmButtonText: t("common.confirm"),
+    cancelButtonText: t("common.cancel"),
+    customClass: "move-confirm-dialog",
+    customStyle: { width: "600px" },
+  });
+};
+
+/** 分组移动确认：原分组（当前父级）→ 新分组（目标父级） */
+const confirmMoveGroup = (
+  groupId: number,
+  toName: string,
+): Promise<unknown> => {
+  const groupName = findNodeName(groupId);
+  const parentId = findParentGroupId(groupId);
+  const fromName = getCurrentLocationName(parentId, false);
+  return confirmMove(
+    t("sidebar.moveGroupConfirmTitle"),
+    t("sidebar.moveGroupConfirmSummary", { group: groupName }),
+    fromName,
+    toName,
+    Folder,
+  );
+};
+
+/** 设备移动确认：原分组 → 新分组 */
+const confirmMoveDevice = (
+  deviceId: number,
+  toName: string,
+): Promise<unknown> => {
+  const deviceName = findNodeName(deviceId);
+  const currentGroupId = findDeviceGroupId(deviceId);
+  const fromName = getCurrentLocationName(currentGroupId, true);
+  return confirmMove(
+    t("sidebar.moveDeviceConfirmTitle"),
+    t("sidebar.moveDeviceConfirmSummary", { device: deviceName }),
+    fromName,
+    toName,
+    Cpu,
+  );
+};
+
+/** 设备拖入分组 */
+const handleDeviceDrop = async (deviceId: number, groupId: number) => {
+  try {
+    await confirmMoveDevice(deviceId, findNodeName(groupId));
+    await moveDevicesToGroup({ device_ids: [deviceId], group_id: groupId });
+    await fetchDeviceGroupTree();
+    const groupKey = `group-${groupId}`;
+    if (!expandedKeys.value.includes(groupKey)) {
+      expandedKeys.value.push(groupKey);
+    }
+    ElMessage.success(
+      t("sidebar.moveDeviceToGroupSuccess", {
+        device: findNodeName(deviceId),
+        group: findNodeName(groupId),
+      }),
+    );
+  } catch (error) {
+    // 用户取消/关闭确认框，静默返回
+    if (error === "cancel" || error === "close") return;
+    console.error("拖拽移动设备失败:", error);
+  }
+};
+
+/** 设备拖到未分组区域（移出分组） */
+const handleDeviceDropUngrouped = async (deviceId: number) => {
+  try {
+    await confirmMoveDevice(deviceId, t("sidebar.ungroupedTarget"));
+    await moveDevicesToGroup({ device_ids: [deviceId], group_id: null });
+    ungroupedExpanded.value = true;
+    await fetchDeviceGroupTree();
+    ElMessage.success(
+      t("sidebar.moveDeviceToUngroupedSuccess", {
+        device: findNodeName(deviceId),
+      }),
+    );
+  } catch (error) {
+    // 用户取消/关闭确认框，静默返回
+    if (error === "cancel" || error === "close") return;
+    console.error("拖拽移出分组失败:", error);
+  }
+};
+
+/** 分组拖到其他分组下（调整层级） */
+const handleGroupDrop = async (groupId: number, targetGroupId: number) => {
+  try {
+    await confirmMoveGroup(groupId, findNodeName(targetGroupId));
+    await updateDeviceGroup(groupId, { parent_id: targetGroupId });
+    await fetchDeviceGroupTree();
+    for (const key of [`group-${targetGroupId}`, `group-${groupId}`]) {
+      if (!expandedKeys.value.includes(key)) {
+        expandedKeys.value.push(key);
+      }
+    }
+    ElMessage.success(
+      t("sidebar.moveGroupSuccess", {
+        group: findNodeName(groupId),
+        target: findNodeName(targetGroupId),
+      }),
+    );
+  } catch (error) {
+    // 用户取消/关闭确认框，静默返回
+    if (error === "cancel" || error === "close") return;
+    console.error("拖拽移动分组失败:", error);
+  }
+};
+
+/** 分组拖到分组树顶部的顶层落点（提升为顶级分组） */
+const handleGroupDropToTop = async (groupId: number) => {
+  try {
+    await confirmMoveGroup(groupId, t("sidebar.topLevelGroup"));
+    await updateDeviceGroup(groupId, { parent_id: null });
+    await fetchDeviceGroupTree();
+    const groupKey = `group-${groupId}`;
+    if (!expandedKeys.value.includes(groupKey)) {
+      expandedKeys.value.push(groupKey);
+    }
+    ElMessage.success(
+      t("sidebar.moveGroupToTopSuccess", { group: findNodeName(groupId) }),
+    );
+  } catch (error) {
+    // 用户取消/关闭确认框，静默返回
+    if (error === "cancel" || error === "close") return;
+    console.error("拖拽提升分组失败:", error);
   }
 };
 
@@ -1043,5 +1344,126 @@ watch(refreshCounter, () => {
   flex-basis: 280px;
   z-index: 999;
   box-shadow: 4px 0 24px rgba(0, 0, 0, 0.2);
+}
+</style>
+
+<style lang="scss">
+/* 移动确认弹框：渲染于 body 下（非 scoped），需使用全局 CSS 变量 */
+.move-confirm-dialog {
+  /* 增大弹框四周留白（默认 12px 偏小） */
+  --el-messagebox-padding-primary: 20px;
+}
+
+.move-confirm-dialog .el-message-box__header {
+  padding-bottom: 10px;
+}
+
+.move-confirm-dialog .el-message-box__title {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+/* 让 message 内容占满容器宽度，配合内部居中实现卡片区整体居中 */
+.move-confirm-dialog .el-message-box__message {
+  width: 100%;
+}
+
+.move-confirm {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+}
+
+.move-confirm__summary {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.move-confirm__icon {
+  flex-shrink: 0;
+  color: var(--color-primary);
+}
+
+.move-confirm__path {
+  display: flex;
+  width: 100%;
+  align-items: stretch;
+  justify-content: center;
+  gap: 12px;
+}
+
+.move-node {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  max-width: 240px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 18px 20px;
+  border-radius: 12px;
+}
+
+.move-node--from {
+  background: linear-gradient(180deg, var(--bg-subtle), var(--bg-muted));
+  border: 1px solid var(--border-color);
+}
+
+.move-node--to {
+  background: linear-gradient(
+    180deg,
+    rgba(59, 130, 246, 0.1),
+    rgba(59, 130, 246, 0.03)
+  );
+  border: 1px solid rgba(59, 130, 246, 0.4);
+  box-shadow: 0 2px 10px rgba(59, 130, 246, 0.1);
+}
+
+.move-node__label {
+  font-size: 12px;
+  letter-spacing: 0.6px;
+  color: var(--text-secondary);
+}
+
+.move-node--to .move-node__label {
+  color: var(--color-primary);
+}
+
+.move-node__value {
+  max-width: 100%;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.4;
+  color: var(--text-primary);
+  text-align: center;
+  /* 长名称允许换行，避免被截断 */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.move-node--to .move-node__value {
+  color: var(--color-primary);
+}
+
+.move-node__arrow {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.12);
+  color: var(--color-primary);
 }
 </style>

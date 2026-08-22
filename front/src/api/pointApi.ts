@@ -147,6 +147,22 @@ export async function setSinglePointStep(
   }
 }
 
+/** 批量获取测点当前值（轻量，供模拟数据自动刷新） */
+export async function batchPointValues(
+  deviceName: string,
+  pointCodes: string[],
+): Promise<Record<string, number | string | null>> {
+  try {
+    return await requestApi(POINT_API.BATCH_VALUES, "post", {
+      device_name: deviceName,
+      point_codes: pointCodes,
+    });
+  } catch (error) {
+    console.error("Error fetching batch point values:", error);
+    throw error;
+  }
+}
+
 export async function setPointSimulationRange(
   deviceName: string,
   pointCode: string,
@@ -205,7 +221,7 @@ export async function readSinglePoint(
   pointCode: string,
   slaveId?: number,
   activeRead: boolean = false,
-): Promise<number | null> {
+): Promise<number | string | null> {
   try {
     const data = await requestApi(POINT_API.READ_SINGLE, "post", {
       device_name: deviceName,

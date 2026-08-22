@@ -2,7 +2,7 @@
   <el-dialog
     v-model="dialogVisible"
     :title="$t('copyDevice.title')"
-    width="480px"
+    width="640px"
     :close-on-click-modal="false"
     @close="handleClose"
     class="modern-dialog"
@@ -14,118 +14,191 @@
       label-width="100px"
       label-position="right"
     >
-      <el-form-item :label="$t('copyDevice.sourceDevice')">
-        <el-input :value="sourceDeviceName" disabled />
-      </el-form-item>
-
-      <el-form-item :label="$t('copyDevice.targetGroup')" prop="targetGroupId">
-        <el-tree-select
-          v-model="form.targetGroupId"
-          :data="groupSelectOptions"
-          :props="{ label: 'name', value: 'id', children: 'children' }"
-          :placeholder="$t('copyDevice.targetGroupPlaceholder')"
-          check-strictly
-          style="width: 100%"
-        />
-      </el-form-item>
-
-      <el-form-item :label="$t('copyDevice.prefix')">
-        <el-input
-          v-model="form.prefix"
-          :placeholder="$t('copyDevice.prefixPlaceholder')"
-        />
-      </el-form-item>
-
-      <el-form-item :label="$t('copyDevice.suffix')">
-        <el-input
-          v-model="form.suffix"
-          :placeholder="$t('copyDevice.suffixPlaceholder')"
-        />
-      </el-form-item>
-
-      <el-form-item :label="$t('copyDevice.copyCount')" prop="count">
-        <el-input-number
-          v-model="form.count"
-          :min="1"
-          :max="100"
-          style="width: 100%"
-        />
-      </el-form-item>
-
-      <el-form-item :label="$t('copyDevice.ipOffset')" prop="ipStartOffset">
-        <el-input-number
-          v-model="form.ipStartOffset"
-          :min="0"
-          :max="254"
-          style="width: 100%"
-        />
-        <div class="form-tip">
-          {{
-            $t("copyDevice.ipPreview", { ip: sourceIp, newIp: previewFirstIp })
-          }}
-        </div>
-      </el-form-item>
-
-      <el-form-item :label="$t('copyDevice.portOffset')" prop="portOffset">
-        <el-input-number
-          v-model="form.portOffset"
-          :min="0"
-          :max="10000"
-          style="width: 100%"
-        />
-        <div class="form-tip">
-          {{
-            $t("copyDevice.portPreview", {
-              port: sourcePort,
-              newPort: previewFirstPort,
-            })
-          }}
-        </div>
-      </el-form-item>
-
-      <el-alert
-        v-if="sourcePointCount > 0"
-        type="info"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 16px"
+      <el-tabs
+        v-model="copyMode"
+        class="device-form-tabs copy-device-tabs"
+        @tab-change="handleTabChange"
       >
-        <template #title>
-          {{ $t("copyDevice.copyPoints", { count: sourcePointCount }) }}
-        </template>
-      </el-alert>
-
-      <el-alert
-        v-if="isIec61850"
-        type="success"
-        :closable="false"
-        show-icon
-        style="margin-bottom: 16px"
-        :title="$t('copyDevice.iec61850Title')"
-      >
-        <div>{{ $t("copyDevice.iec61850Scope") }}</div>
-        <div v-if="modelLabel" class="iec61850-model">
-          {{ $t("copyDevice.iec61850Model", { model: modelLabel }) }}
-        </div>
-      </el-alert>
-
-      <el-form-item :label="$t('copyDevice.copyPreview')">
-        <div class="preview-list">
-          <div
-            v-for="i in Math.min(form.count, 5)"
-            :key="i"
-            class="preview-item"
-          >
-            <span class="preview-name">{{ getPreviewName(i) }}</span>
-            <span class="preview-ip"
-              >{{ getPreviewIp(i) }}:{{ getPreviewPort(i) }}</span
+        <el-tab-pane :label="$t('copyDevice.singleCopy')" name="single">
+          <div v-if="copyMode === 'single'">
+            <el-form-item
+              :label="$t('copyDevice.targetName')"
+              prop="targetName"
             >
+              <el-input
+                v-model="form.targetName"
+                :placeholder="$t('copyDevice.targetNamePlaceholder')"
+                maxlength="100"
+              />
+            </el-form-item>
+
+            <el-form-item
+              :label="$t('copyDevice.targetCode')"
+              prop="targetCode"
+            >
+              <el-input
+                v-model="form.targetCode"
+                :placeholder="$t('copyDevice.targetCodePlaceholder')"
+                maxlength="100"
+              />
+            </el-form-item>
+
+            <el-form-item :label="$t('copyDevice.targetIp')" prop="targetIp">
+              <el-input
+                v-model="form.targetIp"
+                :placeholder="$t('copyDevice.targetIpPlaceholder')"
+              />
+            </el-form-item>
+
+            <el-form-item
+              :label="$t('copyDevice.targetPort')"
+              prop="targetPort"
+            >
+              <el-input-number
+                v-model="form.targetPort"
+                :min="1"
+                :max="65535"
+                style="width: 100%"
+              />
+            </el-form-item>
           </div>
-          <div v-if="form.count > 5" class="preview-more">
-            {{ $t("copyDevice.moreDevices", { count: form.count - 5 }) }}
+        </el-tab-pane>
+
+        <el-tab-pane :label="$t('copyDevice.batchCopy')" name="batch">
+          <div v-if="copyMode === 'batch'">
+            <el-form-item :label="$t('copyDevice.sourceDevice')">
+              <el-input :value="sourceDeviceName" disabled />
+            </el-form-item>
+
+            <el-form-item
+              :label="$t('copyDevice.targetGroup')"
+              prop="targetGroupId"
+            >
+              <el-tree-select
+                v-model="form.targetGroupId"
+                :data="groupSelectOptions"
+                :props="{ label: 'name', value: 'id', children: 'children' }"
+                :placeholder="$t('copyDevice.targetGroupPlaceholder')"
+                check-strictly
+                style="width: 100%"
+              />
+            </el-form-item>
+
+            <el-form-item :label="$t('copyDevice.prefix')">
+              <el-input
+                v-model="form.prefix"
+                :placeholder="$t('copyDevice.prefixPlaceholder')"
+              />
+            </el-form-item>
+
+            <el-form-item :label="$t('copyDevice.suffix')">
+              <el-input
+                v-model="form.suffix"
+                :placeholder="$t('copyDevice.suffixPlaceholder')"
+              />
+            </el-form-item>
+
+            <el-form-item :label="$t('copyDevice.copyCount')" prop="count">
+              <el-input-number
+                v-model="form.count"
+                :min="1"
+                :max="256"
+                style="width: 100%"
+              />
+            </el-form-item>
+
+            <el-form-item :label="$t('copyDevice.ipStart')" prop="ipStart">
+              <el-input
+                v-model="form.ipStart"
+                :placeholder="$t('copyDevice.targetIpPlaceholder')"
+              />
+            </el-form-item>
+
+            <el-form-item :label="$t('copyDevice.ipOffsets')">
+              <div class="ip-offset-row">
+                <div v-for="(_, idx) in 4" :key="idx" class="ip-offset-item">
+                  <span class="ip-offset-label">{{
+                    $t("copyDevice.offsetSegment", { n: idx + 1 })
+                  }}</span>
+                  <el-input-number
+                    v-model="form.ipOffsets[idx]"
+                    :min="0"
+                    :max="255"
+                    :controls="false"
+                    size="small"
+                    class="ip-offset-input"
+                  />
+                </div>
+              </div>
+              <div class="form-tip">
+                {{
+                  $t("copyDevice.ipPreview", {
+                    ip: previewFirstIp,
+                    newIp: getPreviewIp(2),
+                  })
+                }}
+              </div>
+            </el-form-item>
+
+            <el-form-item
+              :label="$t('copyDevice.portOffset')"
+              prop="portOffset"
+            >
+              <el-input-number
+                v-model="form.portOffset"
+                :min="0"
+                :max="10000"
+                style="width: 100%"
+              />
+              <div class="form-tip">
+                {{
+                  $t("copyDevice.portPreview", {
+                    port: sourcePort,
+                    newPort: previewFirstPort,
+                  })
+                }}
+              </div>
+            </el-form-item>
+
+            <el-alert
+              v-if="sourcePointCount > 0"
+              type="info"
+              :closable="false"
+              show-icon
+              style="margin-bottom: 16px"
+            >
+              <template #title>
+                {{ $t("copyDevice.copyPoints", { count: sourcePointCount }) }}
+              </template>
+            </el-alert>
+
+            <el-alert
+              v-if="isIec61850"
+              type="success"
+              :closable="false"
+              show-icon
+              style="margin-bottom: 16px"
+              :title="$t('copyDevice.iec61850Title')"
+            >
+              <div>{{ $t("copyDevice.iec61850Scope") }}</div>
+              <div v-if="modelLabel" class="iec61850-model">
+                {{ $t("copyDevice.iec61850Model", { model: modelLabel }) }}
+              </div>
+            </el-alert>
+
+            <el-form-item :label="$t('copyDevice.copyPreview')">
+              <div class="preview-list">
+                <div v-for="i in form.count" :key="i" class="preview-item">
+                  <span class="preview-name">{{ getPreviewName(i) }}</span>
+                  <span class="preview-ip"
+                    >{{ getPreviewIp(i) }}:{{ getPreviewPort(i) }}</span
+                  >
+                </div>
+              </div>
+            </el-form-item>
           </div>
-        </div>
-      </el-form-item>
+        </el-tab-pane>
+      </el-tabs>
     </el-form>
 
     <template #footer>
@@ -154,13 +227,14 @@ import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import type { FormInstance, FormRules } from "element-plus";
 import { Check } from "@element-plus/icons-vue";
-import { copyDevice } from "@/api/channelApi";
+import { copyDevice, copySingleDevice } from "@/api/channelApi";
 import type { DeviceGroupTreeNode } from "@/api/deviceGroupApi";
 
 const props = defineProps<{
   visible: boolean;
   channelId: number;
   deviceName: string;
+  deviceCode: string;
   deviceIp: string;
   devicePort?: number;
   pointCount?: number;
@@ -180,17 +254,86 @@ const emit = defineEmits<{
 const { t } = useI18n();
 const formRef = ref<FormInstance>();
 const loading = ref(false);
+const copyMode = ref<"single" | "batch">("single");
 
 const form = reactive({
+  targetName: "",
+  targetCode: "",
+  targetIp: "",
+  targetPort: 502,
   prefix: "",
   suffix: "_COPY",
   count: 2,
   targetGroupId: 0,
-  ipStartOffset: 1,
+  ipStart: "",
+  ipOffsets: [0, 0, 0, 1],
   portOffset: 0,
 });
 
+const isValidIpv4 = (value: string): boolean => {
+  const parts = value?.trim().split(".") || [];
+  return (
+    parts.length === 4 &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+  );
+};
+
 const rules: FormRules = {
+  targetName: [
+    {
+      required: true,
+      message: t("copyDevice.targetNameRequired"),
+      trigger: "blur",
+    },
+  ],
+  targetCode: [
+    {
+      required: true,
+      message: t("copyDevice.targetCodeRequired"),
+      trigger: "blur",
+    },
+  ],
+  targetIp: [
+    {
+      required: true,
+      message: t("copyDevice.targetIpRequired"),
+      trigger: "blur",
+    },
+    {
+      validator: (_rule, value: string, callback) => {
+        callback(
+          isValidIpv4(value)
+            ? undefined
+            : new Error(t("copyDevice.targetIpInvalid")),
+        );
+      },
+      trigger: "blur",
+    },
+  ],
+  ipStart: [
+    {
+      required: true,
+      message: t("copyDevice.targetIpRequired"),
+      trigger: "blur",
+    },
+    {
+      validator: (_rule, value: string, callback) => {
+        callback(
+          isValidIpv4(value)
+            ? undefined
+            : new Error(t("copyDevice.targetIpInvalid")),
+        );
+      },
+      trigger: "blur",
+    },
+  ],
+  targetPort: [
+    {
+      required: true,
+      message: t("copyDevice.targetPortRequired"),
+      trigger: "blur",
+    },
+  ],
   count: [
     { required: true, message: t("copyDevice.countRequired"), trigger: "blur" },
   ],
@@ -202,7 +345,6 @@ const dialogVisible = computed({
 });
 
 const sourceDeviceName = computed(() => props.deviceName || "");
-const sourceIp = computed(() => props.deviceIp || "0.0.0.0");
 const sourcePort = computed(() => props.devicePort || 502);
 const sourcePointCount = computed(() => props.pointCount || 0);
 const isIec61850 = computed(() => props.protocolType === 4);
@@ -225,6 +367,22 @@ watch(
   (visible) => {
     if (visible) {
       form.targetGroupId = props.deviceGroupId || 0;
+      form.targetName = `${props.deviceName}_COPY`;
+      form.targetCode = `${props.deviceCode}_COPY`;
+      form.targetIp = props.deviceIp || "0.0.0.0";
+      form.targetPort = props.devicePort || 502;
+      // 默认起始IP = 源IP末段+1，避免第一台复制设备与源设备端点冲突
+      const startParts = (props.deviceIp || "0.0.0.0").split(".");
+      if (startParts.length === 4) {
+        const lastOctet = parseInt(startParts[3], 10);
+        startParts[3] = String(lastOctet + 1 > 255 ? 0 : lastOctet + 1);
+        form.ipStart = startParts.join(".");
+      } else {
+        form.ipStart = "0.0.0.1";
+      }
+      form.ipOffsets = [0, 0, 0, 1];
+      copyMode.value = "single";
+      formRef.value?.clearValidate();
     }
   },
   { immediate: true },
@@ -238,19 +396,22 @@ function getPreviewName(index: number): string {
 }
 
 function getPreviewIp(index: number): string {
-  if (form.ipStartOffset === 0) {
-    return sourceIp.value;
+  const startParts = form.ipStart.split(".").map((p) => parseInt(p, 10));
+  if (startParts.length !== 4) return form.ipStart;
+  const values = startParts.map(
+    (seg, k) => seg + form.ipOffsets[k] * (index - 1),
+  );
+  // 256 进制进位：第4段溢出向第3段进位，依此类推
+  for (let k = 3; k > 0; k--) {
+    if (values[k] > 255) {
+      values[k - 1] += Math.floor(values[k] / 256);
+      values[k] %= 256;
+    }
   }
-  try {
-    const parts = sourceIp.value.split(".");
-    if (parts.length !== 4) return sourceIp.value;
-    const lastOctet = parseInt(parts[3], 10);
-    const newOctet = lastOctet + form.ipStartOffset + index - 1;
-    parts[3] = String(newOctet > 255 ? newOctet - 256 : newOctet);
-    return parts.join(".");
-  } catch {
-    return sourceIp.value;
+  if (values[0] > 255) {
+    return t("copyDevice.ipOutOfRange");
   }
+  return values.join(".");
 }
 
 function getPreviewPort(index: number): number {
@@ -266,15 +427,26 @@ const handleSubmit = async () => {
     if (!valid) return;
     loading.value = true;
     try {
-      const result = await copyDevice({
-        channel_id: props.channelId,
-        count: form.count,
-        prefix: form.prefix,
-        suffix: form.suffix,
-        ip_start_offset: form.ipStartOffset,
-        port_offset: form.portOffset,
-        target_group_id: form.targetGroupId === 0 ? null : form.targetGroupId,
-      });
+      const result =
+        copyMode.value === "single"
+          ? await copySingleDevice({
+              channel_id: props.channelId,
+              target_name: form.targetName.trim(),
+              target_code: form.targetCode.trim(),
+              target_ip: form.targetIp.trim(),
+              target_port: form.targetPort,
+            })
+          : await copyDevice({
+              channel_id: props.channelId,
+              count: form.count,
+              prefix: form.prefix,
+              suffix: form.suffix,
+              ip_start: form.ipStart.trim(),
+              ip_offsets: form.ipOffsets,
+              port_offset: form.portOffset,
+              target_group_id:
+                form.targetGroupId === 0 ? null : form.targetGroupId,
+            });
       ElMessage.success(
         t("copyDevice.copySuccess", { count: result.copied_count }),
       );
@@ -289,6 +461,10 @@ const handleSubmit = async () => {
   });
 };
 
+const handleTabChange = () => {
+  formRef.value?.clearValidate();
+};
+
 const handleClose = () => {
   dialogVisible.value = false;
   emit("close");
@@ -301,6 +477,32 @@ const handleClose = () => {
   color: #909399;
   margin-top: 4px;
   line-height: 1.4;
+}
+
+.ip-offset-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.ip-offset-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+
+.ip-offset-input {
+  flex: 1;
+  min-width: 0;
+}
+
+.ip-offset-label {
+  font-size: 11px;
+  color: #909399;
+  white-space: nowrap;
 }
 
 .iec61850-model {
@@ -341,13 +543,6 @@ const handleClose = () => {
   font-family: monospace;
 }
 
-.preview-more {
-  text-align: center;
-  color: #909399;
-  font-size: 12px;
-  padding-top: 8px;
-}
-
 .dialog-footer {
   display: flex;
   justify-content: flex-end;
@@ -377,12 +572,16 @@ const handleClose = () => {
   }
 
   .el-dialog__body {
-    padding: 24px;
+    padding: 10px 24px 24px;
   }
 
   .el-dialog__footer {
     padding: 16px 24px 20px;
     border-top: 1px solid var(--border-color);
+  }
+
+  .copy-device-tabs {
+    min-height: 0;
   }
 }
 </style>

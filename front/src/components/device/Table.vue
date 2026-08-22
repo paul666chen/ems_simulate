@@ -382,7 +382,13 @@
       <el-table-column
         v-if="props.iec61850Category !== 'DataSets'"
         :label="$t('common.operation')"
-        :width="isClientDevice || isIec61850WithActions ? 240 : 100"
+        :width="
+          isClientDevice || isIec61850WithActions
+            ? 240
+            : isDlt645Server
+              ? 200
+              : 100
+        "
         fixed="right"
       >
         <template #default="scope">
@@ -513,6 +519,16 @@
             >
               {{ $t("table.write") }}
             </el-button>
+            <!-- DLT645 从站: 写入值（直接设置模拟电表内部该数据标识的值，列表数据用逗号分隔） -->
+            <el-button
+              v-if="isDlt645Server"
+              type="success"
+              size="small"
+              :icon="Edit"
+              @click="handleDlt645WriteValue(scope.row['测点编码'])"
+            >
+              {{ $t("slave.dlt645ServerCmd.write_value") }}
+            </el-button>
             <el-popconfirm
               v-if="!isIec61850"
               :title="$t('table.deleteConfirm')"
@@ -557,6 +573,13 @@
     :currentValue="currentPoint.value"
     :pointType="currentPoint.type"
     :slaveId="slaveId"
+    @success="handleWriteSuccess"
+  />
+  <!-- DLT645 从站专用写入对话框 -->
+  <Dlt645WriteDialog
+    v-model="dlt645WriteDialogVisible"
+    :device-name="deviceName"
+    :di="dlt645WritePointCode"
     @success="handleWriteSuccess"
   />
   <!-- IEC61850 专用写入对话框 -->
@@ -728,6 +751,7 @@ import {
   HEADER_I18N_MAP,
 } from "@/constants/table";
 import { isDlt645Protocol } from "@/constants/protocol";
+import { formatTableRealValue } from "@/utils/tableValue";
 
 import SingleRegister from "../register/SingleRegister.vue";
 import LongRegister from "../register/LongRegister.vue";
@@ -740,6 +764,7 @@ import PointMappingConfig from "../point/PointMappingConfig.vue";
 import PointChangeHistory from "../point/PointChangeHistory.vue";
 import WritePointDialog from "./WritePointDialog.vue";
 import Iec61850WriteDialog from "./Iec61850WriteDialog.vue";
+import Dlt645WriteDialog from "./Dlt645WriteDialog.vue";
 
 const { t, locale } = useI18n();
 
@@ -848,6 +873,11 @@ const isIec61850WithActions = computed(() => {
   return isIec61850Server.value || isIec61850Client.value;
 });
 
+/** DLT645 从站（模拟电表服务端）设备 */
+const isDlt645Server = computed(
+  () => String(props.protocolType) === "Dlt645Server",
+);
+
 const readingPoints = reactive<Record<string, boolean>>({});
 const deletingPoints = reactive<Record<string, boolean>>({});
 const showHexAddress = ref(false);
@@ -896,6 +926,11 @@ const hiddenColumns = computed(() => {
     hidden.push("寄存器值", "乘法系数", "加法系数", "帧类型");
   }
 
+  // DLT645 协议按数据标识读取，无寄存器概念，只显示真实值
+  if (isDlt645.value) {
+    hidden.push("寄存器值");
+  }
+
   // 非 IEC61850 协议隐藏 FC 列 (IEC61850 通过专用列渲染 FC)
   if (!props.isIec61850) {
     hidden.push("FC");
@@ -917,6 +952,10 @@ const columnWidthMap = COLUMN_WIDTH_MAP;
 // 根据当前可见列动态生成宽度列表
 const addressFilteredWidthList = computed(() => {
   return filteredTableHeaderWithoutAddress.value.map((header) => {
+    // DLT645 测点编码较短（如 0x00010000），收窄该列宽度
+    if (isDlt645.value && header === "测点编码") {
+      return 110;
+    }
     return columnWidthMap[header] || columnWidthMap["default"];
   });
 });
@@ -968,7 +1007,9 @@ const iec61850RowClassName = ({ row }: { row: any }) => {
   return "";
 };
 
-const tagFilters = FRAME_TYPE_FILTERS;
+const tagFilters = computed(() =>
+  FRAME_TYPE_FILTERS.map((f) => ({ text: t(f.text), value: f.value })),
+);
 
 const iec104TypeFilters = computed(() =>
   IEC104_TYPE_FILTERS.map((f) => ({ text: t(f.text), value: f.value })),
@@ -995,7 +1036,8 @@ const convertedTableData = computed(() => {
         if (displayVal === "None" || displayVal === null) {
           displayVal = "";
         }
-        data[h] = h === "真实值" ? parseFloat(val || 0).toFixed(3) : displayVal;
+        data[h] =
+          h === "真实值" ? formatTableRealValue(displayVal) : displayVal;
       }
     });
     return data;
@@ -1225,9 +1267,11 @@ const isModbusWriteable = (row: any) => {
 const handleReadPoint = async (pointCode: string) => {
   readingPoints[pointCode] = true;
   try {
-    // IEC104 客户端使用主动读取（发送网络请求），其他协议使用缓存读取
+    // IEC104 / DNP3 客户端使用主动读取（发送网络请求），其他协议使用缓存读取
+    const protocolStr = String(props.protocolType);
     const useActiveRead =
-      isClientDevice.value && String(props.protocolType) === "Iec104Client";
+      isClientDevice.value &&
+      (protocolStr === "Iec104Client" || protocolStr === "Dnp3Client");
     const value = await readSinglePoint(
       deviceName.value,
       pointCode,
@@ -1243,6 +1287,15 @@ const handleReadPoint = async (pointCode: string) => {
   } finally {
     readingPoints[pointCode] = false;
   }
+};
+
+/** DLT645 从站：打开写入值对话框（显示测点名称/数据格式，列表项逐个输入） */
+const dlt645WriteDialogVisible = ref(false);
+const dlt645WritePointCode = ref("");
+const handleDlt645WriteValue = (pointCode: string) => {
+  if (!pointCode) return;
+  dlt645WritePointCode.value = pointCode;
+  dlt645WriteDialogVisible.value = true;
 };
 
 const writeDialogVisible = ref(false);
@@ -1308,7 +1361,7 @@ const handleIec61850ReadMetadata = async (pointCode: string) => {
       metadataCache.value = newCache;
     }
   } catch (e: any) {
-    showError(e, t("table.metadataFailed", { msg: "未知错误" }));
+    showError(e, t("table.metadataFailed", { msg: t("table.unknownError") }));
     metadataDialogVisible.value = false;
   } finally {
     readingMetadata.value[pointCode] = false;
@@ -1443,7 +1496,10 @@ const handleIec61850ReadPoint = async (
       ElMessage.warning(t("table.readFailed"));
     }
   } catch (e: any) {
-    showError(e, t("table.iec61850ReadFailed", { msg: "未知错误" }));
+    showError(
+      e,
+      t("table.iec61850ReadFailed", { msg: t("table.unknownError") }),
+    );
   } finally {
     readingPoints[pointCode] = false;
   }
@@ -1568,6 +1624,11 @@ const funcCodeToolTip = FUNC_CODE_TOOLTIP;
   padding: 12px 16px;
   background-color: var(--bg-subtle);
   border: none;
+}
+
+/* 去掉展开单元格默认的大内边距（20px 50px），消除展开区上方间隙 */
+.custom-table :deep(.el-table__expanded-cell) {
+  padding: 0;
 }
 
 /* 配置与控制区域改为左右分布 */

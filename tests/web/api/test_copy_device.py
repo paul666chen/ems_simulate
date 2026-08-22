@@ -2,29 +2,32 @@
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from pydantic import ValidationError
 import pytest
 
 from src.data.service.iec61850_copy_service import Iec61850CopyResult
-from src.web.api.channel.device_manage import copy_device
-from src.web.api.schemas.channel import CopyDeviceRequest
+from src.web.api.channel.device_manage import copy_device, copy_single_device
+from src.web.api.schemas.channel import CopyDeviceRequest, CopySingleDeviceRequest
 
 
 @pytest.fixture(autouse=True)
 def copy_configuration():
     with (
         patch("src.web.api.channel.device_manage.ChannelConfigurationService.clone_for_channel") as clone,
+        patch("src.web.api.channel.device_manage.PointMappingService.clone_for_device"),
+        patch("src.web.api.channel.device_manage.PointMappingService.get_all_mappings", return_value=[]),
         patch("src.data.service.device_service.DeviceService.update_device"),
         patch("src.web.api.channel.device_manage.log"),
     ):
         yield clone
 
 
-def _fake_builder():
+def _fake_builder(device=None):
+    runtime_device = device or SimpleNamespace(name="", set_device_provider=MagicMock())
     return SimpleNamespace(
-        makeGeneralDevice=lambda **_kwargs: SimpleNamespace(name=""),
+        makeGeneralDevice=lambda **_kwargs: runtime_device,
     )
 
 
@@ -43,6 +46,86 @@ def test_copy_device_request_accepts_unchanged_ip_and_port():
 def test_copy_device_request_rejects_negative_ip_offset():
     with pytest.raises(ValidationError):
         CopyDeviceRequest(channel_id=1, ip_start_offset=-1)
+
+
+def test_copy_device_request_accepts_max_count_256():
+    request = CopyDeviceRequest(channel_id=1, count=256)
+    assert request.count == 256
+
+
+def test_copy_device_request_rejects_count_over_256():
+    with pytest.raises(ValidationError):
+        CopyDeviceRequest(channel_id=1, count=257)
+
+
+def test_single_copy_uses_explicit_target_identity_and_endpoint():
+    request = CopySingleDeviceRequest(
+        channel_id=1,
+        target_name="Target device",
+        target_code="TARGET",
+        target_ip="192.168.10.20",
+        target_port=1502,
+    )
+    source_channel = {
+        "id": 1,
+        "device_id": 10,
+        "code": "SOURCE",
+        "name": "Source",
+        "protocol_type": 1,
+        "conn_type": 1,
+        "ip": "127.0.0.1",
+        "port": 502,
+    }
+    app_request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                device_controller=SimpleNamespace(device_list=[], device_map={}),
+            ),
+        ),
+    )
+
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            return_value=30,
+        ) as create_channel,
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": 7},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            return_value=20,
+        ) as create_device,
+        patch(
+            "src.data.service.device_group_service.DeviceGroupService.get_group_by_id",
+            return_value={"id": 7},
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        response = asyncio.run(copy_single_device(request, app_request))
+
+    assert create_device.call_args.kwargs == {
+        "code": "TARGET",
+        "name": "Target device",
+        "device_type": 0,
+        "group_id": 7,
+    }
+    assert create_channel.call_args.kwargs["ip"] == "192.168.10.20"
+    assert create_channel.call_args.kwargs["port"] == 1502
+    assert response.data["copied_count"] == 1
 
 
 @pytest.mark.parametrize(
@@ -183,14 +266,10 @@ def test_copy_loads_runtime_and_security_from_new_channel(copy_configuration):
         "ip": "127.0.0.1",
         "port": 2404,
     }
-    app_request = SimpleNamespace(
-        app=SimpleNamespace(
-            state=SimpleNamespace(
-                device_controller=SimpleNamespace(device_list=[], device_map={}),
-            ),
-        ),
-    )
-    builder = _fake_builder()
+    device_controller = SimpleNamespace(device_list=[], device_map={})
+    app_request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(device_controller=device_controller)))
+    runtime_device = SimpleNamespace(name="", set_device_provider=MagicMock())
+    builder = _fake_builder(runtime_device)
 
     with (
         patch(
@@ -224,6 +303,7 @@ def test_copy_loads_runtime_and_security_from_new_channel(copy_configuration):
     assert copied_channel_data["id"] == 30
     assert copied_channel_data["device_id"] == 20
     assert copied_channel_data["id"] != source_channel["id"]
+    runtime_device.set_device_provider.assert_called_once_with(device_controller, [])
 
 
 def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
@@ -240,6 +320,7 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
     }
     source_points = [
         {
+            "id": 101,
             "code": "YC",
             "name": "YC",
             "rtu_addr": 1,
@@ -253,6 +334,7 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
             "iec_type_id": "M_ME_NB_1",
         },
         {
+            "id": 102,
             "code": "YX",
             "name": "YX",
             "rtu_addr": 1,
@@ -262,8 +344,10 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
             "iec_cot": 20,
             "iec_quality": 0x10,
             "iec_type_id": "M_DP_TB_1",
+            "reverse": True,
         },
         {
+            "id": 103,
             "code": "YK",
             "name": "YK",
             "rtu_addr": 1,
@@ -273,8 +357,11 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
             "iec_cot": 6,
             "iec_quality": 0,
             "iec_type_id": "C_DC_TA_1",
+            "command_type": 1,
+            "related_yx_id": 102,
         },
         {
+            "id": 104,
             "code": "YT",
             "name": "YT",
             "rtu_addr": 1,
@@ -286,6 +373,7 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
             "iec_cot": 6,
             "iec_quality": 1,
             "iec_type_id": "C_SE_NC_1",
+            "related_yc_id": 101,
         },
     ]
     app_request = SimpleNamespace(
@@ -297,11 +385,18 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
     with (
         patch("src.web.api.channel.device_manage.ChannelService.get_channel_by_id", return_value=source_channel),
         patch("src.web.api.channel.device_manage.ChannelService.get_channel_by_code", return_value=None),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[],
+        ),
         patch("src.web.api.channel.device_manage.ChannelService.create_channel", return_value=30),
         patch("src.data.service.device_service.DeviceService.get_device_by_id", return_value={"id": 10}),
         patch("src.data.service.device_service.DeviceService.create_device", return_value=20),
         patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=source_points),
-        patch("src.data.dao.point_dao.PointDao.create_point") as create_point,
+        patch(
+            "src.data.dao.point_dao.PointDao.create_point",
+            side_effect=[{"id": 201}, {"id": 202}, {"id": 203}, {"id": 204}],
+        ) as create_point,
         patch("src.web.api.channel.device_manage.get_device_builder", return_value=_fake_builder()),
     ):
         asyncio.run(copy_device(request, app_request))
@@ -315,6 +410,10 @@ def test_copy_iec104_preserves_protocol_metadata_for_all_point_types():
         assert copied["iec_quality"] == source["iec_quality"]
         assert copied["iec_common_address"] == source["iec_common_address"]
         assert copied["iec_cot"] == source["iec_cot"]
+    assert copied_by_frame[1]["reverse"] is True
+    assert copied_by_frame[2]["command_type"] == 1
+    assert copied_by_frame[2]["related_yx_id"] == 202
+    assert copied_by_frame[3]["related_yc_id"] == 201
 
 
 def test_copy_iec61850_deep_copies_model_resources_and_fc():
@@ -373,6 +472,10 @@ def test_copy_iec61850_deep_copies_model_resources_and_fc():
             side_effect=[source_channel, new_channel],
         ),
         patch("src.web.api.channel.device_manage.ChannelService.get_channel_by_code", return_value=None),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[],
+        ),
         patch("src.web.api.channel.device_manage.ChannelService.create_channel", return_value=30) as create_channel,
         patch("src.data.service.device_service.DeviceService.get_device_by_id", return_value={"id": 10}),
         patch("src.data.service.device_service.DeviceService.create_device", return_value=20),
@@ -394,3 +497,312 @@ def test_copy_iec61850_deep_copies_model_resources_and_fc():
     assert create_point.call_args.args[2]["fc"] == "MX"
     assert configure_network.call_args.args[5]["icd_path"] == new_channel["icd_path"]
     assert response.data["devices"][0]["iec61850"]["dataset_count"] == 2
+
+
+# ---------------------------------------------------------------- 复制：服务端 IP+端口 唯一性
+
+
+def _server_source(**overrides) -> dict:
+    ch = {
+        "id": 1,
+        "device_id": 10,
+        "code": "SOURCE",
+        "name": "Source",
+        "protocol_type": 1,
+        "conn_type": 2,
+        "ip": "192.168.0.1",
+        "port": 502,
+    }
+    ch.update(overrides)
+    return ch
+
+
+def _copy_state():
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                device_controller=SimpleNamespace(device_list=[], device_map={}),
+            ),
+        ),
+    )
+
+
+def test_batch_copy_server_skips_conflicting_endpoint():
+    """批量复制服务端：目标端点与已有服务端冲突时跳过，不创建通道。"""
+    request = CopyDeviceRequest(channel_id=1, count=2, ip_start_offset=0, port_offset=0)
+    source_channel = _server_source()
+    occupied = {"id": 9, "name": "Occupied", "conn_type": 2, "ip": "192.168.0.1", "port": 502}
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[occupied],
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            return_value=30,
+        ) as create_channel,
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": None},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            return_value=20,
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        response = asyncio.run(copy_device(request, _copy_state()))
+
+    assert response.data["copied_count"] == 0
+    create_channel.assert_not_called()
+
+
+def test_batch_copy_server_skips_wildcard_conflict():
+    """批量复制服务端：目标 0.0.0.0 与已有具体 IP 同端口冲突时跳过。"""
+    request = CopyDeviceRequest(channel_id=1, count=1, ip_start_offset=0, port_offset=0)
+    source_channel = _server_source(ip="0.0.0.0")
+    occupied = {"id": 9, "name": "Occupied", "conn_type": 2, "ip": "192.168.0.1", "port": 502}
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[occupied],
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            return_value=30,
+        ) as create_channel,
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": None},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            return_value=20,
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        response = asyncio.run(copy_device(request, _copy_state()))
+
+    assert response.data["copied_count"] == 0
+    create_channel.assert_not_called()
+
+
+def test_batch_copy_server_allows_different_ip_same_port():
+    """批量复制服务端：IP 递增后端点不同（192.168.0.2/3:502），不与 192.168.0.1:502 冲突。"""
+    request = CopyDeviceRequest(channel_id=1, count=2, ip_start_offset=1, port_offset=0)
+    source_channel = _server_source()
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[source_channel],
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            side_effect=[31, 32],
+        ) as create_channel,
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": None},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            side_effect=[21, 22],
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        response = asyncio.run(copy_device(request, _copy_state()))
+
+    assert response.data["copied_count"] == 2
+    assert [item.kwargs["ip"] for item in create_channel.call_args_list] == [
+        "192.168.0.2",
+        "192.168.0.3",
+    ]
+
+
+def test_single_copy_server_rejects_conflicting_endpoint():
+    """单个复制服务端：目标端点与已有服务端冲突时报错。"""
+    from src.web.api.exceptions import ConflictError
+
+    request = CopySingleDeviceRequest(
+        channel_id=1,
+        target_name="Target",
+        target_code="TARGET",
+        target_ip="192.168.0.2",
+        target_port=502,
+    )
+    source_channel = _server_source(port=1502)
+    occupied = {"id": 9, "name": "Occupied", "conn_type": 2, "ip": "192.168.0.2", "port": 502}
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[occupied],
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            return_value=30,
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": None},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            return_value=20,
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        with pytest.raises(ConflictError, match="Occupied"):
+            asyncio.run(copy_single_device(request, _copy_state()))
+
+
+def test_single_copy_server_allows_different_ip_same_port():
+    """单个复制服务端：不同 IP 同端口（192.168.0.2:502 vs 192.168.0.3:502）不冲突。"""
+    request = CopySingleDeviceRequest(
+        channel_id=1,
+        target_name="Target",
+        target_code="TARGET",
+        target_ip="192.168.0.2",
+        target_port=502,
+    )
+    source_channel = _server_source()
+    other = {"id": 9, "name": "Other", "conn_type": 2, "ip": "192.168.0.3", "port": 502}
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[other],
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            return_value=30,
+        ) as create_channel,
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": None},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            return_value=20,
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        response = asyncio.run(copy_single_device(request, _copy_state()))
+
+    assert response.data["copied_count"] == 1
+    assert create_channel.call_args.kwargs["ip"] == "192.168.0.2"
+    assert create_channel.call_args.kwargs["port"] == 502
+
+
+def test_copy_client_device_skips_server_endpoint_check():
+    """客户端（conn_type=1）复制不触发服务端端点检测。"""
+    request = CopySingleDeviceRequest(
+        channel_id=1,
+        target_name="Target",
+        target_code="TARGET",
+        target_ip="192.168.0.2",
+        target_port=502,
+    )
+    source_channel = {
+        "id": 1,
+        "device_id": 10,
+        "code": "SOURCE",
+        "name": "Source",
+        "protocol_type": 1,
+        "conn_type": 1,
+        "ip": "127.0.0.1",
+        "port": 502,
+    }
+    with (
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_id",
+            return_value=source_channel,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_channel_by_code",
+            return_value=None,
+        ),
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.get_all_channels",
+            return_value=[{"id": 9, "name": "Occupied", "conn_type": 2, "ip": "192.168.0.2", "port": 502}],
+        ) as get_all,
+        patch(
+            "src.web.api.channel.device_manage.ChannelService.create_channel",
+            return_value=30,
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.get_device_by_id",
+            return_value={"id": 10, "group_id": None},
+        ),
+        patch(
+            "src.data.service.device_service.DeviceService.create_device",
+            return_value=20,
+        ),
+        patch("src.data.dao.point_dao.PointDao.get_points_by_channel", return_value=[]),
+        patch(
+            "src.web.api.channel.device_manage.get_device_builder",
+            return_value=_fake_builder(),
+        ),
+    ):
+        response = asyncio.run(copy_single_device(request, _copy_state()))
+
+    assert response.data["copied_count"] == 1
+    get_all.assert_not_called()

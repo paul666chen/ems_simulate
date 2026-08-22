@@ -42,9 +42,22 @@ export interface CopyDeviceRequest {
   count: number;
   prefix?: string;
   suffix?: string;
-  ip_start_offset: number;
+  /** 起始IP（4段模板），与 ip_offsets 配合使用；提供时按各段偏移生成IP */
+  ip_start?: string;
+  /** 各段独立偏移量（长度4，0-255） */
+  ip_offsets?: number[];
+  /** 旧逻辑 IP 起始偏移（仅作用最后一段，后端有默认值 1，兼容旧逻辑） */
+  ip_start_offset?: number;
   port_offset?: number;
   target_group_id?: number | null;
+}
+
+export interface CopySingleDeviceRequest {
+  channel_id: number;
+  target_name: string;
+  target_code: string;
+  target_ip: string;
+  target_port: number;
 }
 
 export interface IEC61850DataSetInfo {
@@ -323,12 +336,17 @@ export async function getChannel(channelId: number): Promise<ChannelInfo> {
 export async function updateChannel(
   channelId: number,
   channel: Partial<ChannelCreateRequest>,
+  deferRuntimeReload = false,
 ): Promise<boolean> {
   try {
     return await requestApi(
       CHANNEL_API.UPDATE,
       "post",
-      { channel_id: channelId, ...channel },
+      {
+        channel_id: channelId,
+        ...channel,
+        defer_runtime_reload: deferRuntimeReload,
+      },
       30000,
     );
   } catch (error) {
@@ -340,7 +358,7 @@ export async function updateChannel(
 export async function uploadChannelSecurity(
   channelId: number,
   tlsEnabled: boolean,
-  tlsMode: "basic" | "mutual",
+  tlsMode: "one_way" | "mutual",
   certificate?: File | null,
   privateKey?: File | null,
   caCertificate?: File | null,
@@ -398,6 +416,17 @@ export async function copyDevice(
     return await requestApi(CHANNEL_API.COPY, "post", request);
   } catch (error) {
     console.error("Error copying device:", error);
+    throw error;
+  }
+}
+
+export async function copySingleDevice(
+  request: CopySingleDeviceRequest,
+): Promise<CopyDeviceResponse> {
+  try {
+    return await requestApi(CHANNEL_API.COPY_SINGLE, "post", request);
+  } catch (error) {
+    console.error("Error copying single device:", error);
     throw error;
   }
 }

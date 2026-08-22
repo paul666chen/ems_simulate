@@ -42,16 +42,22 @@
 
     <!-- DL/T645: 标准库或 Excel 点表 -->
     <template v-else-if="protocolType === 3">
-      <el-divider content-position="left">DL/T645 点表</el-divider>
-      <el-form-item label="点表模式">
+      <el-divider content-position="left">{{
+        $t("device.dlt645PointTable")
+      }}</el-divider>
+      <el-form-item :label="$t('device.dlt645PointMode')">
         <el-radio-group v-model="pointMode" :disabled="disabled">
-          <el-radio-button value="standard">标准点表</el-radio-button>
-          <el-radio-button value="import">导入点表</el-radio-button>
+          <el-radio-button value="standard">{{
+            $t("device.dlt645Standard")
+          }}</el-radio-button>
+          <el-radio-button value="import">{{
+            $t("device.dlt645Import")
+          }}</el-radio-button>
         </el-radio-group>
       </el-form-item>
       <el-alert
         v-if="pointMode === 'standard'"
-        title="将从内置 dlt645 标准数据项库自动生成完整点表"
+        :title="$t('device.dlt645StandardTip')"
         type="info"
         :closable="false"
         show-icon
@@ -121,6 +127,7 @@ const props = defineProps<{
   connType?: number;
   disabled?: boolean;
   isEditMode?: boolean;
+  pointMode?: "standard" | "import";
 }>();
 
 const uploadRef = ref();
@@ -133,14 +140,15 @@ const emit = defineEmits<{
 }>();
 
 const pointMode = ref<"standard" | "import">(
-  props.isEditMode ? "import" : "standard",
+  props.pointMode || (props.isEditMode ? "import" : "standard"),
 );
 
 watch(
-  () => props.isEditMode,
-  (isEdit) => {
-    pointMode.value = isEdit ? "import" : "standard";
+  () => props.pointMode,
+  (mode) => {
+    if (mode) pointMode.value = mode;
   },
+  { immediate: true },
 );
 watch(
   pointMode,

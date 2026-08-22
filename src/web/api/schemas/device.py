@@ -11,6 +11,21 @@ class DeviceInfoRequest(BaseModel):
     device_name: str
 
 
+class DLT645CommandRequest(BaseModel):
+    """DL/T645 特殊命令请求（主站/从站功能）"""
+
+    device_name: str
+    command: str
+    params: dict | None = None
+
+
+class DLT645DiInfoRequest(BaseModel):
+    """DL/T645 数据标识（DI）元信息请求"""
+
+    device_name: str
+    di: str
+
+
 class DeviceInfoResponse:
     pass  # 使用 BaseResponse 统一返回
 
@@ -37,7 +52,23 @@ class DeviceTableRequest(BaseModel):
 
 class SimulationStartRequest(BaseModel):
     device_name: str
-    simulate_method: SimulateMethod
+    simulate_method: SimulateMethod | None = Field(None, description="全局模拟方式；为空时不覆盖各测点已配置的方式")
+
+
+class SimulationConfigItem(BaseModel):
+    """单个测点的模拟配置"""
+
+    point_code: str
+    enabled: bool | None = Field(None, description="是否参与模拟")
+    simulate_method: SimulateMethod | None = Field(None, description="模拟方式")
+    step: int | None = Field(None, ge=1, description="模拟步长")
+
+
+class ApplySimulationConfigRequest(BaseModel):
+    """批量应用测点模拟配置请求"""
+
+    device_name: str
+    points: list[SimulationConfigItem]
 
 
 class SimulationStopRequest(BaseModel):

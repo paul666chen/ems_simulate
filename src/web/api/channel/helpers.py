@@ -42,6 +42,7 @@ def configure_builder_network(builder, conn_type, protocol_type, ip, port, chann
         ProtocolType.ModbusTcpClient,
         ProtocolType.Dlt645Client,
         ProtocolType.Iec61850Client,
+        ProtocolType.Dnp3Client,
     ]:
         builder.setDeviceNetConfig(port=port, ip=ip)
     else:
@@ -76,6 +77,7 @@ def is_client_protocol(protocol_type) -> bool:
         ProtocolType.Iec104Client,
         ProtocolType.Dlt645Client,
         ProtocolType.Iec61850Client,
+        ProtocolType.Dnp3Client,
     ]
 
 
@@ -88,8 +90,6 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
         is_start: 是否启动设备
         scl_result: 可选，预先解析的 SclImportResult。提供时跳过 ICD 文件重新解析。
     """
-    await device_controller.remove_device_by_id(channel_id)
-
     channel = await asyncio.to_thread(ChannelService.get_channel_by_id, channel_id)
     if not channel:
         raise NotFoundError(f"通道 {channel_id} 不存在")
@@ -140,6 +140,15 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
 
     new_device = await asyncio.to_thread(build_device)
 
+    # 需要在新实例启动前停止旧实例（释放端口/连接）的场景
+    needs_stop_before_start = is_start and (
+        is_client_protocol(channel_protocol_type)
+        or channel_protocol_type == ProtocolType.Iec61850Server
+        or channel_protocol_type == ProtocolType.Dnp3Server
+    )
+    if needs_stop_before_start:
+        await device_controller.remove_device_by_id(channel_id)
+
     if is_start and is_client_protocol(channel_protocol_type):
         if channel_protocol_type == ProtocolType.Iec61850Client:
             # IEC61850 客户端: 使用 start() 后台线程连接，而非仅启动数据更新线程
@@ -154,6 +163,15 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
         # 必须单独处理，否则 reload_device_instance(is_start=True) 不会启动服务器
         await new_device.start()
         log.info(f"IEC 61850 服务端已启动: {device_name}")
+    elif is_start and channel_protocol_type == ProtocolType.Dnp3Server:
+        # DNP3 服务端（Outstation）: 不在 is_client_protocol 中，需显式启动监听
+        await new_device.start()
+        log.info(f"DNP3 服务端已启动: {device_name}")
+
+    if not needs_stop_before_start:
+        # 非启动场景（或无需先停的启动场景）：新实例已构建完成，
+        # 此时再替换旧实例，避免删除-重建空窗期内接口报"设备不存在"
+        await device_controller.remove_device_by_id(channel_id)
 
     device_controller.device_list.append(new_device)
     device_controller.device_map[new_device.name] = new_device
@@ -178,3 +196,28 @@ def increment_ip(ip: str, offset: int) -> str:
         return ".".join(parts)
     except Exception:
         return ip
+
+
+def apply_ip_offsets(start_ip: str, offsets: list[int], index: int) -> str:
+    """按起始 IP 与各段独立偏移生成第 index 台设备的 IP。
+
+    index 从 1 开始，第 index 台设备第 k 段 = start_ip[k] + offsets[k] * (index - 1)。
+    段值按 256 进制从第 4 段向第 1 段进位；第 1 段溢出视为超出 IPv4 范围。
+    """
+    try:
+        parts = [int(p) for p in start_ip.split(".")]
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"无效的起始IP: {start_ip}") from exc
+    if len(parts) != 4 or any(not (0 <= p <= 255) for p in parts):
+        raise ValueError(f"无效的起始IP: {start_ip}")
+    if len(offsets) != 4:
+        raise ValueError("IP偏移必须包含4个段的偏移量")
+
+    values = [parts[k] + offsets[k] * (index - 1) for k in range(4)]
+    for k in range(3, 0, -1):
+        if values[k] > 255:
+            values[k - 1] += values[k] // 256
+            values[k] %= 256
+    if values[0] > 255:
+        raise ValueError(f"起始IP {start_ip} 偏移后第 {index} 台设备超出 IPv4 范围")
+    return ".".join(str(v) for v in values)

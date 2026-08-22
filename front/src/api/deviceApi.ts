@@ -56,14 +56,11 @@ export async function getDeviceInfo(
   }
 }
 
-export async function startSimulation(
-  deviceName: string,
-  simulateMethod: string,
-): Promise<boolean> {
+export async function startSimulation(deviceName: string): Promise<boolean> {
   try {
     const data = await requestApi(DEVICE_API.START_SIMULATION, "post", {
       device_name: deviceName,
-      simulate_method: simulateMethod,
+      // simulate_method 不传：不覆盖各测点已配置的模拟方式
     });
     return data;
   } catch (error) {
@@ -80,6 +77,55 @@ export async function stopSimulation(deviceName: string): Promise<boolean> {
     return data;
   } catch (error) {
     console.error("Error stop simulation:", error);
+    throw error;
+  }
+}
+
+// ===== 测点级模拟配置 =====
+
+export interface SimulationConfigItem {
+  point_code: string;
+  name?: string;
+  frame_type?: number | null;
+  simulate_method: string;
+  step: number;
+  enabled: boolean;
+}
+
+export interface SimulationConfigApplyResult {
+  applied: string[];
+  failed: { point_code: string; reason: string }[];
+}
+
+/** 获取整机测点模拟配置（Dialog 回显用） */
+export async function getSimulationConfig(
+  deviceName: string,
+): Promise<SimulationConfigItem[]> {
+  try {
+    return await requestApi(DEVICE_API.SIMULATION_CONFIG, "post", {
+      device_name: deviceName,
+    });
+  } catch (error) {
+    console.error("Error fetching simulation config:", error);
+    throw error;
+  }
+}
+
+/** 批量应用测点模拟配置（开始模拟前调用） */
+export async function applySimulationConfig(
+  deviceName: string,
+  points: Pick<
+    SimulationConfigItem,
+    "point_code" | "enabled" | "simulate_method" | "step"
+  >[],
+): Promise<SimulationConfigApplyResult> {
+  try {
+    return await requestApi(DEVICE_API.APPLY_SIMULATION_CONFIG, "post", {
+      device_name: deviceName,
+      points,
+    });
+  } catch (error) {
+    console.error("Error applying simulation config:", error);
     throw error;
   }
 }
@@ -224,6 +270,46 @@ export async function iec104Interrogation(
     console.error("Error sending IEC104 interrogation:", error);
     throw error;
   }
+}
+
+/**
+ * 发送 DL/T645 特殊命令（主站/从站功能）
+ *
+ * @param deviceName 设备名称
+ * @param command 命令名（read_address / write_address / broadcast_time_sync /
+ *                freeze / change_baud_rate / change_password /
+ *                clear_demand / clear_meter / clear_event / set_time）
+ * @param params 命令参数（地址 / 速率 / 密码 / 时间等）
+ * @returns 后端返回的 detail（成功时），失败抛异常
+ */
+export async function sendDlt645Command(
+  deviceName: string,
+  command: string,
+  params: Record<string, unknown> = {},
+): Promise<any> {
+  const data = await requestApi(DEVICE_API.DLT645_COMMAND, "post", {
+    device_name: deviceName,
+    command,
+    params,
+  });
+  return data;
+}
+
+/**
+ * 获取 DL/T645 数据标识（DI）的元信息：名称、数据格式、是否列表及子项格式
+ *
+ * @param deviceName 设备名称
+ * @param di 数据标识（十六进制，如 "0x00000000"）
+ * @returns { di, name, is_list, data_format, list_formats, min_value, max_value }
+ */
+export async function getDlt645DiInfo(
+  deviceName: string,
+  di: string,
+): Promise<any> {
+  return requestApi(DEVICE_API.DLT645_DI_INFO, "post", {
+    device_name: deviceName,
+    di,
+  });
 }
 
 // ===== 报文捕获 =====
@@ -590,7 +676,9 @@ export async function exportModel(
       await new Promise((r) => setTimeout(r, 100));
     }
   } catch (err: any) {
-    throw new Error(`写入文件失败: ${err.message}`);
+    throw new Error(
+      i18n.global.t("device.writeFileFailed", { msg: err.message }),
+    );
   }
 }
 

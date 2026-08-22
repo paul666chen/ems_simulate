@@ -30,6 +30,7 @@ from src.device.data_update.data_update_thread import DataUpdateThread
 from src.device.protocol import ProtocolHandler
 from src.device.protocol.base_handler import ClientHandler
 from src.device.protocol.dlt645_handler import DLT645ClientHandler, DLT645ServerHandler
+from src.device.protocol.dnp3_handler import DNP3ClientHandler, DNP3ServerHandler
 from src.device.protocol.iec104_handler import IEC104ClientHandler, IEC104ServerHandler
 from src.device.protocol.iec61850_handler import IEC61850ClientHandler, IEC61850ServerHandler
 from src.device.protocol.modbus_handler import ModbusClientHandler, ModbusServerHandler
@@ -72,7 +73,7 @@ class Device:
         self.runtime_config: dict[str, Any] = {}
         self.security_config: dict[str, Any] = {
             "tls_enabled": False,
-            "tls_mode": "mutual",
+            "tls_mode": "one_way",
             "certificate_path": None,
             "private_key_path": None,
             "ca_certificate_path": None,
@@ -128,12 +129,16 @@ class Device:
         """获取底层服务器对象"""
         if isinstance(self.protocol_handler, IEC61850ServerHandler):
             return self.protocol_handler.server
+        if isinstance(self.protocol_handler, DNP3ServerHandler):
+            return self.protocol_handler.server
         return None
 
     @property
     def client(self):
         """获取底层客户端对象"""
         if isinstance(self.protocol_handler, IEC61850ClientHandler):
+            return self.protocol_handler.client
+        if isinstance(self.protocol_handler, DNP3ClientHandler):
             return self.protocol_handler.client
         return None
 
@@ -166,6 +171,8 @@ class Device:
             ProtocolType.Dlt645Client: lambda: DLT645ClientHandler(self.log),
             ProtocolType.Iec61850Server: lambda: IEC61850ServerHandler(self.log),
             ProtocolType.Iec61850Client: lambda: IEC61850ClientHandler(self.log),
+            ProtocolType.Dnp3Server: lambda: DNP3ServerHandler(self.log),
+            ProtocolType.Dnp3Client: lambda: DNP3ClientHandler(self.log),
         }
         creator = handler_map.get(self.protocol_type)
         if creator:
@@ -263,6 +270,16 @@ class Device:
     def initIec61850Client(self) -> None:
         """初始化 IEC 61850 客户端"""
         self.protocol_type = ProtocolType.Iec61850Client
+        self.initProtocol()
+
+    def initDnp3Server(self) -> None:
+        """初始化 DNP3 服务端（Outstation）"""
+        self.protocol_type = ProtocolType.Dnp3Server
+        self.initProtocol()
+
+    def initDnp3Client(self) -> None:
+        """初始化 DNP3 客户端（Master）"""
+        self.protocol_type = ProtocolType.Dnp3Client
         self.initProtocol()
 
     def get_iec61850_connect_progress(self) -> dict:
@@ -584,10 +601,12 @@ class Device:
     async def stop(self) -> bool:
         """停止设备"""
         try:
+            await asyncio.to_thread(self.data_update_thread.stop, 6.0)
+            await asyncio.to_thread(self.simulation_controller.stop_simulation, 1.0)
             self.point_calculator.stop()
             if self.protocol_handler:
                 return await self.protocol_handler.stop()
-            return False
+            return True
         except Exception as e:
             self.log.error(f"停止设备失败: {e}")
             return False
@@ -690,15 +709,15 @@ class Device:
 
     # ===== 测点操作（委托给 PointOperator） =====
 
-    def read_single_point(self, point_code: str, slave_id: int | None = None) -> float | None:
+    def read_single_point(self, point_code: str, slave_id: int | None = None) -> float | str | None:
         """读取单个测点的值"""
         return self.point_operator.read_single_point(point_code, slave_id)
 
-    async def read_single_point_async(self, point_code: str, slave_id: int | None = None) -> float | None:
+    async def read_single_point_async(self, point_code: str, slave_id: int | None = None) -> float | str | None:
         """异步读取单个测点的值（读取本地缓存，不发送网络请求）"""
         return await self.point_operator.read_single_point_async(point_code, slave_id)
 
-    async def active_read_single_point_async(self, point_code: str, slave_id: int | None = None) -> float | None:
+    async def active_read_single_point_async(self, point_code: str, slave_id: int | None = None) -> float | str | None:
         """主动读取单个测点的值（发送网络请求获取最新值）"""
         return await self.point_operator.active_read_single_point_async(point_code, slave_id)
 
@@ -733,6 +752,109 @@ class Device:
                 self._sync_iec104_client_values(slave_id)
             self.log.info("总召唤完成，已同步所有从机数据")
         return result
+
+    async def send_dlt645_command(self, command: str, params: dict | None = None) -> dict:
+        """发送 DL/T645 特殊命令（主站/从站功能）
+
+        主站（Dlt645Client）支持：读/写通讯地址、广播校时、冻结命令、
+        更改通信速率、修改密码、最大需量清零、电表清零、事件清零。
+        从站（Dlt645Server）支持：写通讯地址、校时、设置密码、数据清零。
+
+        Args:
+            command: 命令名
+            params: 命令参数（地址/速率/密码等）
+
+        Returns:
+            {"ok": bool, "message": str, "detail": dict | None}
+        """
+        from src.device.protocol.dlt645_handler import (
+            DLT645ClientHandler,
+            DLT645ServerHandler,
+        )
+
+        handler = self.protocol_handler
+        if not isinstance(handler, (DLT645ClientHandler, DLT645ServerHandler)):
+            self.log.error("仅 DLT645 设备支持特殊命令")
+            return {"ok": False, "message": "仅 DLT645 设备支持特殊命令"}
+
+        # dlt645 3.0.0 的 send_command 为原生异步实现，直接等待
+        result = await handler.send_command(command, params or {})
+
+        # 更改通信速率成功后，同步本地配置，使设备信息接口返回新速率
+        if result.get("ok") and command == "change_baud_rate":
+            baud = (params or {}).get("baud")
+            if baud is not None:
+                try:
+                    self.baudrate = int(baud)
+                except (TypeError, ValueError):
+                    pass
+
+        # 写通讯地址成功后，同步本地电表地址（主站记录对端地址，从站记录自身地址）
+        if result.get("ok") and command == "write_address":
+            address = (params or {}).get("address")
+            if address:
+                self.meter_address = str(address)
+
+        # 写入值成功后，从服务端实例映射重新读取对应点并更新点表缓存，
+        # 使表格"真实值"列立即反映新值（与写全局 DIMap 不同，实例映射是读值来源）
+        if result.get("ok") and command == "write_value":
+            self._sync_dlt645_points_after_write(handler, params)
+
+        return result
+
+    def _sync_dlt645_points_after_write(self, handler, params: dict | None = None) -> None:
+        """write_value 写入成功后，将服务端 data_map 中的新值同步到点表缓存。
+
+        DLT645 从站表格真实值读取自 point.real_value（点模型缓存），
+        而写入只修改了服务端实例映射，需重新读取对应点以刷新缓存。
+        直接从实例映射取原始工程值，避免 read_value 的寄存器整数换算截断精度。
+        """
+        from src.device.protocol.dlt645_handler import DLT645ServerHandler
+
+        if not isinstance(handler, DLT645ServerHandler):
+            return
+        di_str = str((params or {}).get("di", "")).strip()
+        try:
+            di = int(di_str, 16)
+        except ValueError:
+            return
+        server = getattr(handler, "server", None)
+        if server is None:
+            return
+
+        def _raw_primary(item) -> float | None:
+            from dlt645.model.types.dlt645_type import Demand
+
+            def extract(value):
+                if isinstance(value, Demand):
+                    value = value.value
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    return float(value)
+                return None
+
+            if isinstance(item, list):
+                for it in item:
+                    if it is None:
+                        continue
+                    val = extract(getattr(it, "value", None))
+                    if val is not None:
+                        return val
+                return None
+            return extract(getattr(item, "value", None))
+
+        item = server.get_data_item(di)
+        if item is None:
+            return
+        raw = _raw_primary(item)
+        if raw is None:
+            return
+        for point in self.point_manager.get_all_points():
+            try:
+                if int(point.address) == di:
+                    point.real_value = raw
+                    point.is_valid = True
+            except (TypeError, ValueError):
+                continue
 
     async def read_point_metadata_async(self, point_code: str, slave_id: int | None = None) -> dict:
         """异步读取测点的品质(q)与时标(t)元数据"""
@@ -836,8 +958,48 @@ class Device:
     def setSinglePointStep(self, point_code: str, step: int) -> bool:
         return self.simulation_controller.set_single_point_step(point_code, step)
 
+    def setSinglePointStatus(self, point_code: str, is_running: bool) -> bool:
+        """按测点编码设置模拟启停状态"""
+        return self.simulation_controller.set_point_status_by_code(point_code, is_running)
+
+    def getSimulationConfig(self) -> list[dict]:
+        """获取整机测点模拟配置（回显用）"""
+        configs: list[dict] = []
+        for point, simulator in self.simulation_controller.points.items():
+            configs.append(
+                {
+                    "point_code": point.code,
+                    "name": point.name,
+                    "frame_type": getattr(point, "frame_type", None),
+                    "simulate_method": simulator.simulate_method.value,
+                    "step": simulator.step,
+                    "enabled": simulator.is_running,
+                }
+            )
+        return configs
+
+    def applySimulationConfig(self, items: list[dict]) -> dict:
+        """批量应用测点模拟配置（是否模拟 + 模拟方式 + 步长）。
+
+        配置是"要模拟的测点"的完整定义：未包含在配置中的测点将被禁用模拟，
+        避免仅启用已选点、其余保持默认全量模拟。批量场景不打逐点日志。
+        """
+        applied, failed = self.simulation_controller.apply_configuration(items)
+        self.log.info(f"应用模拟配置: 成功 {len(applied)} 个测点, 失败 {len(failed)} 个")
+        return {"applied": applied, "failed": failed}
+
     def getPointInfo(self, point_code: str) -> dict:
         return self.simulation_controller.get_point_info(point_code)
+
+    def getPointsValues(self, point_codes: list[str]) -> dict[str, float | int | str | None]:
+        """批量获取测点当前值（轻量，供自动刷新；仅返回存在的测点）"""
+        values: dict[str, float | int | str | None] = {}
+        for code in point_codes:
+            point = self.point_manager.get_point_by_code(code)
+            if point is None:
+                continue
+            values[code] = point.real_value if isinstance(point, (Yc, Yt)) else point.value
+        return values
 
     def setPointSimulationRange(self, point_code: str, min_value: float, max_value: float) -> bool:
         return self.simulation_controller.set_point_simulation_range(point_code, min_value, max_value)
@@ -1013,12 +1175,12 @@ class Device:
         """设置测点关联"""
         self.point_operator.set_related_point(point, related_point)
 
-    def reload_mappings(self) -> None:
+    def reload_mappings(self, mappings: list[dict[str, Any]] | None = None) -> None:
         """重新加载测点映射"""
         if self.point_calculator:
-            self.point_calculator.reload_mappings()
+            self.point_calculator.reload_mappings(mappings)
 
-    def set_device_provider(self, provider: Any) -> None:
+    def set_device_provider(self, provider: Any, mappings: list[dict[str, Any]] | None = None) -> None:
         """设置设备提供者"""
         if self.point_calculator:
-            self.point_calculator.set_device_provider(provider)
+            self.point_calculator.set_device_provider(provider, mappings)

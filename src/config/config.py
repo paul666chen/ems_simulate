@@ -27,12 +27,14 @@ class Config:
     DEFAULT_PORT: int = 502
     IEC104_DEFAULT_PORT: int = 2404
     DLT645_DEFAULT_PORT: int = 8899
+    DNP3_DEFAULT_PORT: int = 20000
     DEFAULT_IP: str = "0.0.0.0"
 
     # 数据源配置
     data_source: DataSource = DataSource.Db
 
     # Web服务配置
+    web_host: str = "127.0.0.1"  # 服务监听地址，默认仅本机访问
     web_port: int = 8991
 
     @classmethod
@@ -67,6 +69,7 @@ class Config:
 
                 # Server 配置
                 if "server" in config:
+                    cls.web_host = config["server"].get("host", cls.web_host)
                     cls.web_port = int(config["server"].get("port", cls.web_port))
             else:
                 print(f"Warning: Config file {config_file} not found, using defaults")
