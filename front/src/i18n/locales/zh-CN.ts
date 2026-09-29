@@ -280,7 +280,10 @@ export default {
     tcpServer: "TCP服务端",
     protocol: "通讯协议",
     ip: "IP地址",
-    ipPlaceholder: "0.0.0.0 (服务端监听所有IP)",
+    ipPlaceholder: "0.0.0.0 = 监听所有 IP；或填写本机已配置的具体 IP",
+    ipServerHelp:
+      "0.0.0.0 = 监听所有 IP；可填写本机网卡上已配置的具体 IP（同一网卡可配置多个 IP，同端口不同 IP 可并存）",
+    ipInvalid: "请输入有效的 IPv4 地址",
     comPort: "串口号",
     comPortPlaceholder: "选择或输入串口",
     dataBits: "数据位",

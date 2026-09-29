@@ -27,6 +27,7 @@
 - [自动读取后端任务重构计划](features/auto-read/auto-read-backend-task-refactor-plan.md)
 - [设备表单协议与安全设计](features/device-configuration/device-form-tabs-protocol-security-design.md)
 - [测点级仿真配置设计](features/simulation/point-level-simulation-config-design.md)
+- [服务端多 IP 绑定改造方案（单网卡多 IP 场景）](features/server-bind-address/server-nic-multi-ip-binding-plan.md)
 
 ### 协议
 

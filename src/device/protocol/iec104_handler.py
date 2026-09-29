@@ -115,15 +115,45 @@ class IEC104ServerHandler(ServerHandler):
 
     async def start(self) -> bool:
         """启动 IEC104 服务器"""
+        from src.device.protocol.endpoint_check import check_tcp_endpoint, is_tcp_port_listening
+
         try:
-            if self._server:
-                self._server.start()
-                self._is_running = True
-                if self._connection_monitoring_supported:
-                    self._start_traffic_poller()
-                return True
-            return False
+            if not self._server:
+                self._set_last_error("IEC104 服务器未初始化")
+                return False
+
+            # TLS 桥接时对外监听地址仍是配置 IP；原生 c104 直绑同地址
+            listen_ip = getattr(self._server, "ip", None) or self._config.get("ip", Config.DEFAULT_IP)
+            listen_port = getattr(self._server, "port", None) or self._config.get("port", Config.IEC104_DEFAULT_PORT)
+            ok, reason = check_tcp_endpoint(listen_ip, listen_port)
+            if not ok:
+                self._set_last_error(reason)
+                if self._log:
+                    self._log.error(f"启动 IEC104 服务器失败: {reason}")
+                return False
+
+            self._clear_last_error()
+            self._server.start()
+            # c104 绑定失败通常不抛异常：短延时后确认本机是否真正 LISTEN
+            await asyncio.sleep(0.2)
+            if not is_tcp_port_listening(listen_ip, listen_port):
+                err = f"监听 {listen_ip}:{listen_port} 失败：c104 未建立监听"
+                self._set_last_error(err)
+                if self._log:
+                    self._log.error(f"启动 IEC104 服务器失败: {err}")
+                try:
+                    self._server.stop()
+                except Exception:
+                    pass
+                self._is_running = False
+                return False
+
+            self._is_running = True
+            if self._connection_monitoring_supported:
+                self._start_traffic_poller()
+            return True
         except Exception as e:
+            self._set_last_error(str(e))
             if self._log:
                 self._log.error(f"启动 IEC104 服务器失败: {e}")
             return False

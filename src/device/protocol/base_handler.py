@@ -25,10 +25,22 @@ class ProtocolHandler(ABC):
         self._is_running: bool = False
         self._config: dict[str, Any] = {}
         self._message_capture = None  # 报文捕获器引用
+        self._last_error: str | None = None
 
     @property
     def is_running(self) -> bool:
         return self._is_running
+
+    @property
+    def last_error(self) -> str | None:
+        """最近一次启动/操作失败原因（面向用户的可读文案）。"""
+        return self._last_error
+
+    def _set_last_error(self, message: str | None) -> None:
+        self._last_error = message
+
+    def _clear_last_error(self) -> None:
+        self._last_error = None
 
     @property
     def message_capture(self):

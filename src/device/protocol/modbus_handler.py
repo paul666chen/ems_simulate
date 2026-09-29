@@ -34,6 +34,7 @@ class ModbusServerHandler(ServerHandler):
 
         Args:
             config: 配置字典，包含:
+                - ip: 监听 IP（默认 0.0.0.0）
                 - port: 服务端口
                 - slave_id_list: 从机 ID 列表
                 - protocol_type: 协议类型 (ModbusTcp/ModbusRtu)
@@ -41,6 +42,7 @@ class ModbusServerHandler(ServerHandler):
         from src.proto.pyModbus.server import ModbusServer
 
         self._config = config
+        ip = (config.get("ip") or "").strip() or Config.DEFAULT_IP
         port = config.get("port", Config.DEFAULT_PORT)
         self._slave_id_list = config.get("slave_id_list", [1])
         protocol_type = config.get("protocol_type", ProtocolType.ModbusTcpServer)
@@ -59,12 +61,13 @@ class ModbusServerHandler(ServerHandler):
         parity = config.get("parity", "N")
 
         if self._log:
-            self._log.info(f"Modbus 服务端初始化: port={port}, slave_id_list={self._slave_id_list}")
+            self._log.info(f"Modbus 服务端初始化: ip={ip}, port={port}, slave_id_list={self._slave_id_list}")
 
         self._server = ModbusServer(
             logger=self._log,
             slave_id_list=self._slave_id_list,
             port=port,
+            ip=ip,
             protocol_type=protocol_type,
             serial_port=serial_port,
             baudrate=baudrate,
@@ -88,13 +91,51 @@ class ModbusServerHandler(ServerHandler):
 
     async def start(self) -> bool:
         """启动 Modbus 服务器"""
+        from src.device.protocol.endpoint_check import check_tcp_endpoint
+
         try:
-            if self._server:
-                asyncio.create_task(self._server.start())
-                self._is_running = True
-                return True
-            return False
+            if not self._server:
+                self._set_last_error("Modbus 服务器未初始化")
+                return False
+
+            protocol_type = self._config.get("protocol_type", ProtocolType.ModbusTcpServer)
+            if protocol_type in (ProtocolType.ModbusTcpServer, ProtocolType.ModbusRtuOverTcp):
+                ok, reason = check_tcp_endpoint(self._server.ip, self._server.port)
+                if not ok:
+                    self._set_last_error(reason)
+                    if self._log:
+                        self._log.error(f"启动 Modbus 服务器失败: {reason}")
+                    return False
+
+            self._clear_last_error()
+            self._server.ready_event.clear()
+            self._server.start_error = None
+            task = asyncio.create_task(self._server.start())
+
+            if protocol_type in (ProtocolType.ModbusTcpServer, ProtocolType.ModbusRtuOverTcp, ProtocolType.ModbusUdp):
+                try:
+                    await asyncio.wait_for(self._server.ready_event.wait(), timeout=5.0)
+                except TimeoutError:
+                    err = self._server.start_error or f"监听 {self._server.ip}:{self._server.port} 超时"
+                    if not task.done():
+                        task.cancel()
+                    self._set_last_error(err)
+                    if self._log:
+                        self._log.error(f"启动 Modbus 服务器失败: {err}")
+                    self._is_running = False
+                    return False
+                if task.done() and not self._server.ready_event.is_set():
+                    err = self._server.start_error or f"监听 {self._server.ip}:{self._server.port} 失败"
+                    self._set_last_error(err)
+                    if self._log:
+                        self._log.error(f"启动 Modbus 服务器失败: {err}")
+                    self._is_running = False
+                    return False
+
+            self._is_running = True
+            return True
         except Exception as e:
+            self._set_last_error(str(e))
             if self._log:
                 self._log.error(f"启动 Modbus 服务器失败: {e}")
             return False

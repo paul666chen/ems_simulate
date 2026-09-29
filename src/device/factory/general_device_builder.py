@@ -168,16 +168,12 @@ class GeneralDeviceBuilder:
 
     @property
     def generalDeviceIec104Server(self) -> Device:
-        from src.proto.iec104.iec104server import IEC104Server
-
         self.setDeviceId(self.device_id)
         self.setDeviceName(name=self.device_name)
         self.importDataPoints()
         self.initIec104Server()
         self.general_device.setSpecialDataPointValues()
-        if self.is_start and isinstance(self.general_device.server, IEC104Server):
-            print(f"start server: {self.general_device.port}")
-            self.general_device.server.start()
+        # 启动由 async handler.start() 驱动，不在同步构建方法里绑定端口（避免与旧实例竞态）
         return self.general_device
 
     @property

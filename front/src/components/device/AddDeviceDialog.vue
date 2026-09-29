@@ -414,12 +414,31 @@ const form = reactive<ChannelCreateRequest>({
 });
 
 const rules = computed<FormRules>(() => {
+  const ipv4Pattern =
+    /^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)$/;
   const base: FormRules = {
     code: [
       { required: true, message: t("addDevice.codeRequired"), trigger: "blur" },
     ],
     name: [
       { required: true, message: t("addDevice.nameRequired"), trigger: "blur" },
+    ],
+    ip: [
+      {
+        validator: (_rule, value, callback) => {
+          const v = (value ?? "").toString().trim();
+          if (!v) {
+            callback();
+            return;
+          }
+          if (!ipv4Pattern.test(v)) {
+            callback(new Error(t("device.ipInvalid")));
+            return;
+          }
+          callback();
+        },
+        trigger: "blur",
+      },
     ],
     port: [
       { required: true, message: t("addDevice.portRequired"), trigger: "blur" },

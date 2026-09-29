@@ -4,7 +4,6 @@ import asyncio
 
 from fastapi import APIRouter, Request
 
-from src.config.config import Config
 from src.data.dao.point_dao import PointDao
 from src.data.service.channel_configuration_service import ChannelConfigurationService
 from src.data.service.channel_service import ChannelService
@@ -216,13 +215,17 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
             if protocol_enum in [
                 ProtocolType.ModbusTcpClient,
                 ProtocolType.Iec104Client,
+                ProtocolType.Iec101Client,
                 ProtocolType.Dlt645Client,
                 ProtocolType.Iec61850Client,
                 ProtocolType.Dnp3Client,
             ]:
                 builder.setDeviceNetConfig(port=req.port, ip=req.ip)
             else:
-                builder.setDeviceNetConfig(port=req.port, ip=Config.DEFAULT_IP)
+                # 服务端：通道 ip 即为监听绑定地址
+                from src.web.api.channel.helpers import resolve_bind_ip
+
+                builder.setDeviceNetConfig(port=req.port, ip=resolve_bind_ip(req.ip))
 
         # 传递 IEC61850 IED 模型名称
         if protocol_enum in (ProtocolType.Iec61850Server, ProtocolType.Iec61850Client):

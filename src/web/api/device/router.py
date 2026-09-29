@@ -278,8 +278,9 @@ async def start_device(req: DeviceStartRequest, request: Request):
     device = _get_device(req.device_name, request)
     success = await device.start()
     if not success:
-        log.error(f"设备 {req.device_name} 启动失败 (连接被拒绝或超时)")
-        raise OperationError("设备启动失败! (连接被拒绝或超时)", data=False)
+        reason = getattr(device, "last_start_error", None) or "设备启动失败"
+        log.error(f"设备 {req.device_name} 启动失败: {reason}")
+        raise OperationError(reason, data=False)
     return BaseResponse(message="设备启动成功!", data=True)
 
 

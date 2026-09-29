@@ -283,7 +283,10 @@ export default {
     tcpServer: "TCP Server",
     protocol: "Protocol",
     ip: "IP Address",
-    ipPlaceholder: "0.0.0.0 (server listens all)",
+    ipPlaceholder: "0.0.0.0 = listen all; or a host-configured IPv4",
+    ipServerHelp:
+      "0.0.0.0 = listen on all addresses; or enter a specific IPv4 already configured on this host (multiple IPs on one NIC can share the same port)",
+    ipInvalid: "Please enter a valid IPv4 address",
     comPort: "COM Port",
     comPortPlaceholder: "Select or enter COM port",
     dataBits: "Data Bits",

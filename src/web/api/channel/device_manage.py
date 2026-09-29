@@ -9,8 +9,8 @@ from src.data.service.channel_configuration_service import ChannelConfigurationS
 from src.data.service.channel_service import ChannelService
 from src.data.service.iec61850_copy_service import Iec61850CopyResult, Iec61850CopyService
 from src.data.service.point_mapping_service import PointMappingService
-from src.enums.modbus_def import ProtocolType
 from src.web.api.channel.helpers import (
+    SERVER_PROTOCOLS,
     apply_ip_offsets,
     configure_builder_network,
     get_device_builder,
@@ -19,7 +19,7 @@ from src.web.api.channel.helpers import (
     reload_device_instance,
 )
 from src.web.api.channel.router import _server_ip_conflicts, _validate_server_endpoint_unique
-from src.web.api.exceptions import ConflictError, NotFoundError, ValidationError
+from src.web.api.exceptions import ConflictError, NotFoundError, OperationError, ValidationError
 from src.web.api.schemas import BaseResponse, ChannelIdRequest, CopyDeviceRequest, CopySingleDeviceRequest
 from src.web.log import log
 
@@ -51,23 +51,22 @@ async def create_and_start_device(req: ChannelIdRequest, request: Request):
     )
     general_device.name = channel_name
 
-    if is_client_protocol(channel_protocol_type):
-        # 客户端协议只建立连接；自动读取由用户通过界面显式开启。
-        await general_device.start()
-    elif channel_protocol_type in (
-        ProtocolType.Iec61850Server,
-        ProtocolType.Iec101Server,
-        ProtocolType.Dnp3Server,
-    ):
-        # asyncio 服务端均需显式启动监听。
-        await general_device.start()
-        log.info(f"{channel_protocol_type.value} 服务端已启动: {channel_name}")
+    start_failed_reason: str | None = None
+    if is_client_protocol(channel_protocol_type) or channel_protocol_type in SERVER_PROTOCOLS:
+        started = await general_device.start()
+        if not started:
+            start_failed_reason = getattr(general_device, "last_start_error", None) or "设备启动失败"
+        elif channel_protocol_type in SERVER_PROTOCOLS:
+            log.info(f"{channel_protocol_type.value} 服务端已启动: {channel_name}")
 
     device_controller = request.app.state.device_controller
     device_controller.device_list.append(general_device)
     device_controller.device_map[general_device.name] = general_device
     mappings = await asyncio.to_thread(PointMappingService.get_all_mappings)
     await asyncio.to_thread(general_device.set_device_provider, device_controller, mappings)
+
+    if start_failed_reason:
+        raise OperationError(start_failed_reason, data=False)
 
     log.info(f"设备 {channel_name} 创建并启动成功")
     return BaseResponse(message="设备创建并启动成功", data={"device_name": channel_name})

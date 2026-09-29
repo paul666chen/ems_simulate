@@ -28,6 +28,23 @@ def get_device_builder(channel_id: int, channel_code: str) -> GeneralDeviceBuild
         return GeneralDeviceBuilder(channel_id=channel_id, device=GeneralDevice())
 
 
+# TCP 服务端协议：reload / create-and-start 需显式 start，且先停旧实例再启新实例
+SERVER_PROTOCOLS = {
+    ProtocolType.ModbusTcpServer,
+    ProtocolType.ModbusRtuOverTcp,
+    ProtocolType.Iec104Server,
+    ProtocolType.Dlt645Server,
+    ProtocolType.Iec61850Server,
+    ProtocolType.Dnp3Server,
+    ProtocolType.Iec101Server,
+}
+
+
+def resolve_bind_ip(ip: str | None) -> str:
+    """服务端监听地址：空值回退为通配 0.0.0.0。"""
+    return (ip or "").strip() or Config.DEFAULT_IP
+
+
 def configure_builder_network(builder, conn_type, protocol_type, ip, port, channel_data):
     """配置构建器的网络/串口参数"""
     if conn_type in [0, 3]:  # 串口
@@ -48,7 +65,8 @@ def configure_builder_network(builder, conn_type, protocol_type, ip, port, chann
     ]:
         builder.setDeviceNetConfig(port=port, ip=ip)
     else:
-        builder.setDeviceNetConfig(port=port, ip=Config.DEFAULT_IP)
+        # 服务端：通道 ip 即为监听绑定地址（空 / 未填 → 0.0.0.0）
+        builder.setDeviceNetConfig(port=port, ip=resolve_bind_ip(ip))
 
     # IEC 61850: 传递 IED 模型名称 (从通道配置的 model_name 字段获取，对应 ICD 文件中的 IED name)
     if protocol_type in (ProtocolType.Iec61850Server, ProtocolType.Iec61850Client):
@@ -165,34 +183,19 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
 
     # 需要在新实例启动前停止旧实例（释放端口/连接）的场景
     needs_stop_before_start = is_start and (
-        is_client_protocol(channel_protocol_type)
-        or channel_protocol_type == ProtocolType.Iec61850Server
-        or channel_protocol_type == ProtocolType.Dnp3Server
-        or channel_protocol_type == ProtocolType.Iec101Server
+        is_client_protocol(channel_protocol_type) or channel_protocol_type in SERVER_PROTOCOLS
     )
     if needs_stop_before_start:
         await device_controller.remove_device_by_id(channel_id)
 
-    if is_start and is_client_protocol(channel_protocol_type):
-        if channel_protocol_type == ProtocolType.Iec61850Client:
-            # IEC61850 客户端: 使用 start() 后台线程连接，而非仅启动数据更新线程
-            await new_device.start()
-        else:
-            # Modbus/其他客户端：先连接服务器，再启动数据更新线程
-            await new_device.start()
-    elif is_start and channel_protocol_type == ProtocolType.Iec61850Server:
-        # IEC61850 服务端: 需要显式启动 MMS 服务器
-        # 注意: IEC61850 服务器不在 is_client_protocol 中，
-        # 必须单独处理，否则 reload_device_instance(is_start=True) 不会启动服务器
-        await new_device.start()
-        log.info(f"IEC 61850 服务端已启动: {device_name}")
-    elif is_start and channel_protocol_type == ProtocolType.Dnp3Server:
-        # DNP3 服务端（Outstation）: 不在 is_client_protocol 中，需显式启动监听
-        await new_device.start()
-        log.info(f"DNP3 服务端已启动: {device_name}")
-    elif is_start and channel_protocol_type == ProtocolType.Iec101Server:
-        await new_device.start()
-        log.info(f"IEC101 从站已启动: {device_name}")
+    start_failed_reason: str | None = None
+    if is_start and (is_client_protocol(channel_protocol_type) or channel_protocol_type in SERVER_PROTOCOLS):
+        started = await new_device.start()
+        if not started:
+            start_failed_reason = getattr(new_device, "last_start_error", None) or "设备启动失败"
+            log.error(f"设备 {device_name} 重载后启动失败: {start_failed_reason}")
+        elif channel_protocol_type in SERVER_PROTOCOLS:
+            log.info(f"{channel_protocol_type.value} 服务端已启动: {device_name}")
 
     if not needs_stop_before_start:
         # 非启动场景（或无需先停的启动场景）：新实例已构建完成，
@@ -207,6 +210,11 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
     # 对运行中计算器重载映射并重新订阅当前内存中的新测点。
     mappings = await asyncio.to_thread(PointMappingService.get_all_mappings)
     await asyncio.to_thread(new_device.set_device_provider, device_controller, mappings)
+
+    if start_failed_reason:
+        from src.web.api.exceptions import OperationError
+
+        raise OperationError(start_failed_reason, data=False)
 
     if is_start and previous_auto_read_config is not None:
         await new_device.start_auto_read(previous_auto_read_config)

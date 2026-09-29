@@ -179,14 +179,37 @@ class DNP3ServerHandler(ServerHandler):
 
     async def start(self) -> bool:
         """启动 DNP3 服务端。"""
-        if self._server:
-            # 已有 capture 由 initialize 建立，保持复用；仅当基类显式设置了才同步
-            if self._message_capture is not None:
-                self._server.set_message_capture(self._message_capture)
+        from src.device.protocol.endpoint_check import check_tcp_endpoint
+
+        if not self._server:
+            self._set_last_error("DNP3 服务器未初始化")
+            return False
+
+        ip = (self._config.get("ip") or "").strip() or Config.DEFAULT_IP
+        port = self._config.get("port", Config.DNP3_DEFAULT_PORT)
+        ok, reason = check_tcp_endpoint(ip, port)
+        if not ok:
+            self._set_last_error(reason)
+            if self._log:
+                self._log.error(f"启动 DNP3 服务器失败: {reason}")
+            return False
+
+        # 已有 capture 由 initialize 建立，保持复用；仅当基类显式设置了才同步
+        self._clear_last_error()
+        if self._message_capture is not None:
+            self._server.set_message_capture(self._message_capture)
+        try:
             ok = await self._server.start()
             self._is_running = ok
+            if not ok:
+                self._set_last_error(f"监听 {ip}:{port} 失败")
             return ok
-        return False
+        except Exception as e:
+            self._set_last_error(str(e))
+            if self._log:
+                self._log.error(f"启动 DNP3 服务器失败: {e}")
+            self._is_running = False
+            return False
 
     async def stop(self) -> bool:
         """关闭所有连接并停止 DNP3 服务端。"""

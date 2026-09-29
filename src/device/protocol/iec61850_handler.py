@@ -106,20 +106,37 @@ class IEC61850ServerHandler(ServerHandler):
         v3.0+: 必须先加载 ICD 模型后才能启动，不再支持默认 GenericLD 模型。
         请先通过 load_model(icd_path) 加载 ICD 模型，再调用 start()。
         """
+        from src.device.protocol.endpoint_check import check_tcp_endpoint
+
         try:
             if not self._server:
+                self._set_last_error("IEC 61850 服务器未初始化")
                 return False
 
             if not self._server.model_loaded:
+                err = "未加载 ICD 模型，请先通过 ICD 文件加载模型"
+                self._set_last_error(err)
                 if self._log:
-                    self._log.error("启动 IEC 61850 服务器失败: 未加载 ICD 模型，请先通过 ICD 文件加载模型")
+                    self._log.error(f"启动 IEC 61850 服务器失败: {err}")
+                return False
+
+            ip = (self._config.get("ip") or "").strip() or "0.0.0.0"
+            port = self._config.get("port", 102)
+            ok, reason = check_tcp_endpoint(ip, port)
+            if not ok:
+                self._set_last_error(reason)
+                if self._log:
+                    self._log.error(f"启动 IEC 61850 服务器失败: {reason}")
                 return False
 
             # 模型已加载，启动 MMS 服务
+            self._clear_last_error()
             if self._mms_capture:
                 self._mms_capture.start()
             await asyncio.to_thread(self._server.start_device)
             self._is_running = self._server.is_running
+            if not self._is_running:
+                self._set_last_error(f"监听 {ip}:{port} 失败")
             return self._is_running
         except Exception as e:
             if self._server and self._server.is_running:
@@ -127,6 +144,7 @@ class IEC61850ServerHandler(ServerHandler):
             if self._mms_capture:
                 self._mms_capture.stop()
             self._is_running = False
+            self._set_last_error(str(e))
             if self._log:
                 self._log.error(f"启动 IEC 61850 服务器失败: {e}")
             return False

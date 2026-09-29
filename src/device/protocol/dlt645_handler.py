@@ -260,15 +260,31 @@ class DLT645ServerHandler(ServerHandler):
 
     async def start(self) -> bool:
         """启动 DLT645 服务器"""
+        from src.device.protocol.endpoint_check import check_tcp_endpoint
+
         try:
-            if self._server:
-                await self._server.start()
-                self._is_running = True
-                if self._log:
-                    self._log.info(f"DLT645 服务器启动成功, 电表地址: {self._meter_address}")
-                return True
-            return False
+            if not self._server:
+                self._set_last_error("DLT645 服务器未初始化")
+                return False
+
+            if not getattr(self, "_is_serial", False):
+                ip = (self._config.get("ip") or "").strip() or "0.0.0.0"
+                port = self._config.get("port", 8899)
+                ok, reason = check_tcp_endpoint(ip, port)
+                if not ok:
+                    self._set_last_error(reason)
+                    if self._log:
+                        self._log.error(f"启动 DLT645 服务器失败: {reason}")
+                    return False
+
+            self._clear_last_error()
+            await self._server.start()
+            self._is_running = True
+            if self._log:
+                self._log.info(f"DLT645 服务器启动成功, 电表地址: {self._meter_address}")
+            return True
         except Exception as e:
+            self._set_last_error(str(e))
             if self._log:
                 self._log.error(f"启动 DLT645 服务器失败: {e}")
             return False

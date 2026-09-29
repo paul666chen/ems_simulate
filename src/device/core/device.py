@@ -616,11 +616,23 @@ class Device:
         try:
             self.point_calculator.start()
             if self.protocol_handler:
-                return await self.protocol_handler.start()
+                ok = await self.protocol_handler.start()
+                if not ok:
+                    reason = getattr(self.protocol_handler, "last_error", None)
+                    if reason:
+                        self.log.error(f"启动设备失败: {reason}")
+                return ok
             return False
         except Exception as e:
             self.log.error(f"启动设备失败: {e}")
             return False
+
+    @property
+    def last_start_error(self) -> str | None:
+        """最近一次协议启动失败原因。"""
+        if self.protocol_handler:
+            return getattr(self.protocol_handler, "last_error", None)
+        return None
 
     async def stop(self) -> bool:
         """停止设备"""

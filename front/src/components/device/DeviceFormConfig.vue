@@ -42,6 +42,12 @@
           v-model="modelValue.ip"
           :placeholder="$t('device.ipPlaceholder')"
         />
+        <div
+          v-if="modelValue.conn_type === 2"
+          class="form-item-tip"
+        >
+          {{ $t("device.ipServerHelp") }}
+        </div>
       </el-form-item>
       <el-form-item :label="$t('device.port')" prop="port">
         <el-input-number
@@ -204,3 +210,12 @@ const onMediaTypeChange = (val: any) => {
   );
 };
 </script>
+
+<style scoped>
+.form-item-tip {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--el-text-color-secondary);
+}
+</style>

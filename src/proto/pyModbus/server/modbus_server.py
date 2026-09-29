@@ -181,6 +181,7 @@ class ModbusServer:
         slave_id_list: list[int],
         port: int = 502,
         protocol_type: ProtocolType = ProtocolType.ModbusTcpServer,
+        ip: str = "0.0.0.0",
         serial_port: str = "COM1",
         baudrate: int = 9600,
         bytesize: int = 8,
@@ -201,7 +202,7 @@ class ModbusServer:
         self._logger = logger
         self.server = None
         self.protocol_type = protocol_type
-        self.ip = "0.0.0.0"
+        self.ip = (ip or "").strip() or "0.0.0.0"
         self.port = port
         self.serial_port = serial_port
         self.baudrate = baudrate
@@ -223,6 +224,8 @@ class ModbusServer:
         self.loop = None
         self.is_running = False
         self.stop_event = asyncio.Event()
+        self.ready_event = asyncio.Event()
+        self.start_error: str | None = None
         self.message_capture = MessageCapture()  # 报文捕获器
         self.on_write_callback = None  # 客户端写入回调用
 
@@ -253,7 +256,7 @@ class ModbusServer:
             self.on_write_callback(slave_id, fx, address, values)
 
     def setServerAddress(self, address):
-        self.ip = address
+        self.ip = (address or "").strip() or "0.0.0.0"
 
     def setProtocolType(self, protocol_type):
         self.protocol_type = protocol_type
@@ -428,10 +431,21 @@ class ModbusServer:
             if self.server:
                 # 替换 callback_new_connection 以注入带客户端 IP 捕获的 RequestHandler
                 self._patch_server_handler()
+                # listen 成功后置位 ready_event，供 handler 确认真实绑定完成
+                original_listen = self.server.listen
+
+                async def _listen_and_signal_ready(*args, **kwargs):
+                    ok = await original_listen(*args, **kwargs)
+                    if ok:
+                        self.ready_event.set()
+                    return ok
+
+                self.server.listen = _listen_and_signal_ready
                 await self.server.serve_forever()
             else:
                 self._logger.error(f"无法初始化服务器: {self.protocol_type}")
         except Exception as e:
+            self.start_error = str(e)
             self._logger.error(f"运行 Modbus 服务器失败 ({self.protocol_type}): {e}")
             raise
 
@@ -478,6 +492,8 @@ class ModbusServer:
         """异步启动服务器"""
         self.is_running = True
         self.stop_event.clear()
+        self.ready_event.clear()
+        self.start_error = None
 
         try:
             # 使用runAsyncServer直接启动服务器
@@ -487,6 +503,7 @@ class ModbusServer:
             await self.runAsyncServer(runArgs)
         except Exception as e:
             if not self.stop_event.is_set():
+                self.start_error = self.start_error or str(e)
                 self._logger.error(f"服务器运行过程中出错: {e}")
                 self.is_running = False
         finally:

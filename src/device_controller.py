@@ -169,13 +169,16 @@ class DeviceController:
                     )
                 elif (
                     channel_protocol_type == ProtocolType.Iec104Client
+                    or channel_protocol_type == ProtocolType.Iec101Client
                     or channel_protocol_type == ProtocolType.ModbusTcpClient
                     or channel_protocol_type == ProtocolType.Dlt645Client
                     or channel_protocol_type == ProtocolType.Iec61850Client
+                    or channel_protocol_type == ProtocolType.Dnp3Client
                 ):  # TCP 客户端
                     general_device_builder.setDeviceNetConfig(port=port, ip=ip)
-                else:  # TCP 服务端
-                    general_device_builder.setDeviceNetConfig(port=port, ip=Config.DEFAULT_IP)
+                else:  # TCP 服务端：通道 ip 即为监听绑定地址
+                    bind_ip = (ip or "").strip() or Config.DEFAULT_IP
+                    general_device_builder.setDeviceNetConfig(port=port, ip=bind_ip)
 
                 # 传递 IEC61850 IED 模型名称
                 if channel_protocol_type in (ProtocolType.Iec61850Server, ProtocolType.Iec61850Client):
