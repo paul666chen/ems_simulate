@@ -33,17 +33,36 @@ async def _sync_imported_points(request: Request, channel_id: int, *, rebuild: b
         log.warning(f"导入点表后未找到内存设备 (ID: {channel_id})，需要手动加载或重启")
         return
 
-    if device.protocol_type in (ProtocolType.Iec104Server, ProtocolType.Iec104Client):
+    if device.protocol_type in (
+        ProtocolType.Iec104Server,
+        ProtocolType.Iec104Client,
+        ProtocolType.Iec101Server,
+        ProtocolType.Iec101Client,
+    ):
         was_running = device.is_protocol_running()
-        was_auto_reading = device.is_auto_read_running() if device.protocol_type == ProtocolType.Iec104Client else False
+        auto_read_status = device.get_auto_read_status()
+        auto_read_config = (
+            device.auto_read_manager.current_config()
+            if device.protocol_type in (ProtocolType.Iec104Client, ProtocolType.Iec101Client)
+            and auto_read_status.get("state") == "running"
+            else None
+        )
         new_device = await reload_device_instance(device_controller, channel_id, is_start=False)
         if was_running and not await new_device.start():
             raise RuntimeError("IEC104 设备重建后恢复启动失败")
-        if was_auto_reading:
-            new_device.start_auto_read()
+        if auto_read_config is not None:
+            await new_device.start_auto_read(auto_read_config)
         return
 
     if device.protocol_type == ProtocolType.Iec61850Server:
+        was_running = device.is_protocol_running()
+        await reload_device_instance(device_controller, channel_id, is_start=was_running)
+        return
+
+    if device.protocol_type in (ProtocolType.Dnp3Server, ProtocolType.Dnp3Client):
+        # DNP3 的点不仅存在于 PointManager，还会在初始化时注册到底层
+        # Outstation 点库 / Master 点映射中。仅重复导入 PointManager 会保留
+        # 旧点并让协议层继续使用导入前的点库，因此必须完整重建设备。
         was_running = device.is_protocol_running()
         await reload_device_instance(device_controller, channel_id, is_start=was_running)
         return

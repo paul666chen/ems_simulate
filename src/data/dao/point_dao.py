@@ -3,6 +3,8 @@
 提供四类测点的 CRUD 操作，通过 channel_id 查询
 """
 
+import json
+
 from src.data.controller.db import local_session
 from src.data.log import log
 from src.data.model.point_yc import PointYc, PointYcDict
@@ -10,6 +12,7 @@ from src.data.model.point_yk import PointYk, PointYkDict
 from src.data.model.point_yt import PointYt, PointYtDict
 from src.data.model.point_yx import PointYx, PointYxDict
 from src.enums.modbus_register import Decode
+from src.proto.dnp3.point_config import Dnp3PointConfig
 
 
 def _format_reg_addr(addr: str) -> str:
@@ -38,6 +41,21 @@ def _format_reg_addr(addr: str) -> str:
         except ValueError:
             # 无法解析，原样返回（让后续验证处理）
             return addr
+
+
+def _serialize_dnp3_config(point_data: dict, frame_type: int) -> str | None:
+    raw = point_data.get("dnp3_config")
+    if raw in (None, ""):
+        return None
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, dict):
+        raise ValueError("dnp3_config 必须是对象")
+    return json.dumps(
+        Dnp3PointConfig.from_mapping(frame_type, raw).to_dict(),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 class PointDao:
@@ -220,7 +238,7 @@ class PointDao:
         try:
             with local_session() as session, session.begin():
                 # 依次在四个表中查找
-                for model in [PointYc, PointYx, PointYk, PointYt]:
+                for frame_type, model in enumerate([PointYc, PointYx, PointYk, PointYt]):
                     query = session.query(model).where(model.code == code)
                     if channel_id is not None:
                         query = query.where(model.channel_id == channel_id)
@@ -275,6 +293,9 @@ class PointDao:
                         # IEC61850 FC
                         if "fc" in metadata:
                             result.fc = metadata["fc"] if metadata["fc"] else None
+
+                        if "dnp3_config" in metadata:
+                            result.dnp3_config = _serialize_dnp3_config(metadata, frame_type)
 
                         return True
                 return False
@@ -335,7 +356,7 @@ class PointDao:
         """创建遥测点"""
         try:
             with local_session() as session, session.begin():
-                decode_code = point_data.get("decode_code", "0x41")
+                decode_code = point_data.get("decode_code", "INT32_ABCD")
                 mul_coe = point_data.get("mul_coe", 1.0)
                 add_coe = point_data.get("add_coe", 0.0)
                 calc_max, calc_min = Decode.get_limits_by_code(decode_code, mul_coe, add_coe)
@@ -357,6 +378,7 @@ class PointDao:
                     iec_type_id=point_data.get("iec_type_id"),
                     iec_quality=point_data.get("iec_quality", 0),
                     fc=point_data.get("fc"),
+                    dnp3_config=_serialize_dnp3_config(point_data, 0),
                     enable=point_data.get("enable", True),
                 )
                 session.add(point)
@@ -378,7 +400,7 @@ class PointDao:
                     rtu_addr=point_data.get("rtu_addr", 1),
                     reg_addr=_format_reg_addr(point_data["reg_addr"]),
                     func_code=point_data.get("func_code", 2),
-                    decode_code=point_data.get("decode_code", "0x10"),
+                    decode_code=point_data.get("decode_code", "UINT8_AB"),
                     bit=point_data.get("bit"),
                     reverse=point_data.get("reverse", False),
                     iec_common_address=point_data.get("iec_common_address"),
@@ -386,6 +408,7 @@ class PointDao:
                     iec_type_id=point_data.get("iec_type_id"),
                     iec_quality=point_data.get("iec_quality", 0),
                     fc=point_data.get("fc"),
+                    dnp3_config=_serialize_dnp3_config(point_data, 1),
                     enable=point_data.get("enable", True),
                 )
                 session.add(point)
@@ -407,7 +430,7 @@ class PointDao:
                     rtu_addr=point_data.get("rtu_addr", 1),
                     reg_addr=_format_reg_addr(point_data["reg_addr"]),
                     func_code=point_data.get("func_code", 5),
-                    decode_code=point_data.get("decode_code", "0x10"),
+                    decode_code=point_data.get("decode_code", "UINT8_AB"),
                     bit=point_data.get("bit"),
                     command_type=point_data.get("command_type", 0),
                     related_yx_id=point_data.get("related_yx_id"),
@@ -416,6 +439,7 @@ class PointDao:
                     iec_type_id=point_data.get("iec_type_id"),
                     iec_quality=point_data.get("iec_quality", 0),
                     fc=point_data.get("fc"),
+                    dnp3_config=_serialize_dnp3_config(point_data, 2),
                     enable=point_data.get("enable", True),
                 )
                 session.add(point)
@@ -430,7 +454,7 @@ class PointDao:
         """创建遥调点"""
         try:
             with local_session() as session, session.begin():
-                decode_code = point_data.get("decode_code", "0x41")
+                decode_code = point_data.get("decode_code", "INT32_ABCD")
                 mul_coe = point_data.get("mul_coe", 1.0)
                 add_coe = point_data.get("add_coe", 0.0)
                 calc_max, calc_min = Decode.get_limits_by_code(decode_code, mul_coe, add_coe)
@@ -453,6 +477,7 @@ class PointDao:
                     iec_type_id=point_data.get("iec_type_id"),
                     iec_quality=point_data.get("iec_quality", 0),
                     fc=point_data.get("fc"),
+                    dnp3_config=_serialize_dnp3_config(point_data, 3),
                     enable=point_data.get("enable", True),
                 )
                 session.add(point)
@@ -490,7 +515,7 @@ class PointDao:
             with local_session() as session, session.begin():
                 for point_data in points_data_list:
                     if frame_type == 0:  # 遥测
-                        decode_code = point_data.get("decode_code", "0x41")
+                        decode_code = point_data.get("decode_code", "INT32_ABCD")
                         mul_coe = point_data.get("mul_coe", 1.0)
                         add_coe = point_data.get("add_coe", 0.0)
                         calc_max, calc_min = Decode.get_limits_by_code(decode_code, mul_coe, add_coe)
@@ -512,6 +537,7 @@ class PointDao:
                             iec_type_id=point_data.get("iec_type_id"),
                             iec_quality=point_data.get("iec_quality", 0),
                             fc=point_data.get("fc"),
+                            dnp3_config=_serialize_dnp3_config(point_data, 0),
                             enable=point_data.get("enable", True),
                         )
                     elif frame_type == 1:  # 遥信
@@ -522,7 +548,7 @@ class PointDao:
                             rtu_addr=point_data.get("rtu_addr", 1),
                             reg_addr=_format_reg_addr(point_data["reg_addr"]),
                             func_code=point_data.get("func_code", 2),
-                            decode_code=point_data.get("decode_code", "0x10"),
+                            decode_code=point_data.get("decode_code", "UINT8_AB"),
                             bit=point_data.get("bit"),
                             reverse=point_data.get("reverse", False),
                             iec_common_address=point_data.get("iec_common_address"),
@@ -530,6 +556,7 @@ class PointDao:
                             iec_type_id=point_data.get("iec_type_id"),
                             iec_quality=point_data.get("iec_quality", 0),
                             fc=point_data.get("fc"),
+                            dnp3_config=_serialize_dnp3_config(point_data, 1),
                             enable=point_data.get("enable", True),
                         )
                     elif frame_type == 2:  # 遥控
@@ -540,7 +567,7 @@ class PointDao:
                             rtu_addr=point_data.get("rtu_addr", 1),
                             reg_addr=_format_reg_addr(point_data["reg_addr"]),
                             func_code=point_data.get("func_code", 5),
-                            decode_code=point_data.get("decode_code", "0x10"),
+                            decode_code=point_data.get("decode_code", "UINT8_AB"),
                             bit=point_data.get("bit"),
                             command_type=point_data.get("command_type", 0),
                             related_yx_id=point_data.get("related_yx_id"),
@@ -549,10 +576,11 @@ class PointDao:
                             iec_type_id=point_data.get("iec_type_id"),
                             iec_quality=point_data.get("iec_quality", 0),
                             fc=point_data.get("fc"),
+                            dnp3_config=_serialize_dnp3_config(point_data, 2),
                             enable=point_data.get("enable", True),
                         )
                     elif frame_type == 3:  # 遥调
-                        decode_code = point_data.get("decode_code", "0x41")
+                        decode_code = point_data.get("decode_code", "INT32_ABCD")
                         mul_coe = point_data.get("mul_coe", 1.0)
                         add_coe = point_data.get("add_coe", 0.0)
                         calc_max, calc_min = Decode.get_limits_by_code(decode_code, mul_coe, add_coe)
@@ -575,6 +603,7 @@ class PointDao:
                             iec_type_id=point_data.get("iec_type_id"),
                             iec_quality=point_data.get("iec_quality", 0),
                             fc=point_data.get("fc"),
+                            dnp3_config=_serialize_dnp3_config(point_data, 3),
                             enable=point_data.get("enable", True),
                         )
                     else:

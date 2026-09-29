@@ -7,6 +7,8 @@ IEC 61850 MMS 服务端封装 (门面模式)
 
 import contextlib
 import os
+import queue
+import threading
 from typing import Any
 
 from .defs import (
@@ -16,7 +18,9 @@ from .log import log
 from .plugins.datamodels.builder import IedModelBuilder
 from .plugins.datasets.server import ServerDataSetManager
 from .plugins.files.server import ServerFileService
+from .plugins.log_plugin.server import ServerLogManager
 from .plugins.reports.manager import ReportManager
+from .plugins.setting_groups.server import ServerSettingGroupsManager
 
 if HAS_IEC61850:
     from pyiec61850 import pyiec61850 as iec61850
@@ -64,6 +68,8 @@ class IEC61850Server:
         self.model_name = self._builder.model_name  # 同步
         self._ds_manager = ServerDataSetManager(self._builder, self.model_name)
         self._report_manager = ReportManager(self._builder, self.model_name)
+        self._setting_group_manager = ServerSettingGroupsManager(self)
+        self._log_manager = ServerLogManager(self)
 
         self._server = None
         self._is_running = False
@@ -75,6 +81,13 @@ class IEC61850Server:
         self._last_import_result = None
         self._loaded_ied_ld_insts: set[str] = set()
         self._password_authenticator = None
+        self._connection_callback = None
+        self._native_connection_handler = None
+        # 连接指示回调只做最小记录（入队），实际的连接监控记录放到独立工作线程，
+        # 避免回调在原生 C/SWIG 线程里执行重活而阻塞关联建立（同进程客户端持 GIL 时会被拒）。
+        self._event_queue: queue.Queue = queue.Queue()
+        self._event_worker: threading.Thread | None = None
+        self._event_worker_stop = threading.Event()
 
         if self.authentication_enabled:
             from .server_auth import Iec61850ServerPasswordAuthenticator
@@ -183,6 +196,12 @@ class IEC61850Server:
         server_config = iec61850.IedServerConfig_create()
         try:
             iec61850.IedServerConfig_setMaxMmsConnections(server_config, self.max_connections)
+            enable_edit_sg = getattr(iec61850, "IedServerConfig_enableEditSG", None)
+            if enable_edit_sg is not None:
+                enable_edit_sg(server_config, True)
+            enable_log_service = getattr(iec61850, "IedServerConfig_enableLogService", None)
+            if enable_log_service is not None:
+                enable_log_service(server_config, True)
             if getattr(self, "_files", None) is not None:
                 self._configure_file_service_config(server_config)
             if getattr(self, "tls_configuration", None) is None:
@@ -198,9 +217,122 @@ class IEC61850Server:
                 )
             if getattr(self, "_files", None) is not None:
                 self._configure_file_service_server(server)
+            self._install_connection_handler(server)
             return server
         finally:
             iec61850.IedServerConfig_destroy(server_config)
+
+    def set_connection_callback(self, callback) -> None:
+        """Register callback(connection_key, connected, peer, local)."""
+        self._connection_callback = callback
+
+    def _install_connection_handler(self, server) -> None:
+        """Install the binding callback, falling back to the native C ABI."""
+        setter = getattr(iec61850, "IedServer_setConnectionIndicationHandler", None)
+        if setter is None:
+            return
+        # 先启动连接事件工作线程，确保回调一旦触发就能异步消费，不阻塞原生线程。
+        self._start_connection_event_worker()
+        self._native_connection_handler = self._handle_connection_indication
+        try:
+            setter(server, self._native_connection_handler, None)
+            return
+        except TypeError:
+            # 已实测：本版 pyiec61850 的 IedServer_setConnectionIndicationHandler 不接受
+            # Python 回调（抛 TypeError），而 ctypes 兜底安装会导致 libiec61850 拒绝客户端
+            # 关联（同进程客户端持 GIL 时回调无法执行 → 关联被拒，参见 CONNECTION_REJECTED=5）。
+            # 为保证连接可用，SWIG 无法安装时不再回退到 ctypes。
+            log.warning(
+                "IEC61850 连接监控回调无法通过 SWIG 安装，跳过连接指示监控（避免 ctypes 安装导致客户端关联被拒绝）"
+            )
+            return
+
+    @staticmethod
+    def _connection_key(connection) -> str:
+        native = getattr(connection, "this", connection)
+        try:
+            return f"mms:{int(native)}"
+        except (TypeError, ValueError):
+            return f"mms:{native!s}"
+
+    def _handle_connection_indication(self, server, connection, connected, parameter) -> None:
+        del server, parameter
+        try:
+            peer = iec61850.ClientConnection_getPeerAddress(connection)
+            local = iec61850.ClientConnection_getLocalAddress(connection)
+            self._emit_connection_indication(self._connection_key(connection), bool(connected), peer, local)
+        except Exception as exc:
+            # 连接指示回调运行在原生 C/SWIG 回调中：任何异常一旦泄漏到原生层，
+            # 都会破坏连接的建立/关闭，导致客户端被拒绝（如 IED_ERROR_CONNECTION_REJECTED）
+            # 或连接被异常断开。此处必须捕获并记录，绝不能让异常穿透原生回调。
+            log.error(f"MMS 连接指示回调处理失败: {exc}", exc_info=True)
+
+    def _emit_connection_indication(self, key: str, connected: bool, peer, local) -> None:
+        """最小化连接指示回调：仅将事件入队，真正的监控记录由工作线程完成。
+
+        回调运行在原生 C/SWIG 线程上；若在这里直接执行 connection_callback
+        （其会做 registry 写入等较重的 Python 工作），在与同进程客户端争用 GIL 时
+        会阻塞关联建立，导致客户端被拒绝。入队后立即返回，避免阻塞。
+        """
+        self._event_queue.put((key, bool(connected), peer, local))
+
+    def _start_connection_event_worker(self) -> None:
+        """启动（幂等）消费连接事件的工作线程。"""
+        if self._event_worker is not None and self._event_worker.is_alive():
+            return
+        self._event_worker_stop.clear()
+        self._event_worker = threading.Thread(
+            target=self._connection_event_worker,
+            name="iec61850-conn-monitor",
+            daemon=True,
+        )
+        self._event_worker.start()
+
+    def _stop_connection_event_worker(self) -> None:
+        """停止连接事件工作线程（发送哨兵并等待线程退出）。"""
+        if self._event_worker is None:
+            return
+        self._event_worker_stop.set()
+        self._event_queue.put(None)
+        worker = self._event_worker
+        self._event_worker = None
+        worker.join(timeout=2)
+
+    def _connection_event_worker(self) -> None:
+        """消费连接事件并调用注册的 connection_callback，完成监控记录。"""
+        while not self._event_worker_stop.is_set():
+            try:
+                item = self._event_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if item is None:
+                self._event_queue.task_done()
+                break
+            key, connected, peer, local = item
+            try:
+                if self._connection_callback:
+                    self._connection_callback(key, connected, peer, local)
+            except Exception as exc:
+                log.error(f"处理连接监控事件失败: {exc}", exc_info=True)
+            finally:
+                self._event_queue.task_done()
+
+    def get_connection_count(self) -> int:
+        """返回当前打开的客户端连接数（轮询自原生 IedServer，不依赖连接指示回调）。
+
+        连接指示回调（ctypes）会因同进程客户端持 GIL 而导致关联被拒，因此改为
+        直接读取 IedServer_getNumberOfOpenConnections 轮询计数；只能提供连接数，
+        无法枚举每一连接的 IP/端口详情。
+        """
+        if not self._server or not self._is_running:
+            return 0
+        try:
+            getter = getattr(iec61850, "IedServer_getNumberOfOpenConnections", None)
+            if getter is None:
+                return 0
+            return int(getter(self._server) or 0)
+        except Exception:
+            return 0
 
     def _configure_file_service_config(self, server_config) -> None:
         """Enable MMS file services in bindings that expose config-level APIs."""
@@ -409,6 +541,8 @@ class IEC61850Server:
         self._builder = IedModelBuilder(self.model_name, self.ied_name, self.ld_name)
         self._ds_manager = ServerDataSetManager(self._builder, self.model_name)
         self._report_manager = ReportManager(self._builder, self.model_name)
+        self._setting_group_manager = ServerSettingGroupsManager(self)
+        self._log_manager = ServerLogManager(self)
         self._model_changed = True
         self._model_loaded = False
         self._loaded_icd_path = ""
@@ -497,8 +631,22 @@ class IEC61850Server:
             if not selected_ld_insts or report.ld_inst in selected_ld_insts
         ]
 
-        # 为每个逻辑设备创建 LD
+        # 先按 SCL 层级创建全部 LD/LN。控制块可能位于没有业务测点的
+        # LLN0 中，不能再依赖 point 列表间接创建父节点。
         seen_lds: set[str] = set()
+        for doc_ied in getattr(result.doc, "ieds", []):
+            if doc_ied.name != ied_name:
+                continue
+            for access_point in doc_ied.access_points:
+                if not access_point.server:
+                    continue
+                for ld in access_point.server.ldevices:
+                    seen_lds.add(ld.inst)
+                    self._get_or_create_ld(ld.inst)
+                    for ln in ([ld.ln0] + ld.lns) if ld.ln0 else ld.lns:
+                        self._get_or_create_ln(ld.inst, ln.ln_name)
+
+        # 兼容非标准导入结果：为测点中出现但 SCL 层级未声明的 LD/LN 补建节点。
         for point in loaded_points:
             address = point.reg_addr
             if "/" not in address:
@@ -694,6 +842,11 @@ class IEC61850Server:
                 )
             except Exception as e:
                 log.warning(f"注册 ReportControl 失败: {rc.name}, error={e}")
+
+        # 7. 注册 SettingControl、Log 与 LogControl。它们属于本地服务端
+        # 模型能力，必须在 IedServer_create 之前挂到原生 IedModel 上。
+        self._setting_group_manager.load_from_scl(result.doc, ied_name)
+        self._log_manager.load_from_scl(result.doc, ied_name)
 
         self._model_loaded = True
         self._loaded_icd_path = icd_path
@@ -966,6 +1119,7 @@ class IEC61850Server:
             iec61850.IedServer_destroy(self._server)
             self._server = None
             self._is_running = False
+            self._stop_connection_event_worker()
             log.info("IEC 61850 服务器已停止")
 
     def restart(self) -> bool:
@@ -1110,6 +1264,8 @@ class IEC61850Server:
                     iec61850.IedServer_updateInt32AttributeValue(self._server, da, int(value))
         except Exception as e:
             log.error(f"IEC61850 调用底层设置值函数失败: address={address}, value={value}, error={e}")
+        else:
+            self._log_manager.record(address, value)
 
     def set_point_values(self, values: list[tuple[Any, Any, str]]) -> bool:
         """在一次数据模型事务中批量更新测点。
@@ -1149,6 +1305,16 @@ class IEC61850Server:
     def reports(self):
         """获取 Reports 管理对象"""
         return self._report_manager
+
+    @property
+    def setting_groups(self):
+        """获取服务端定值组管理对象。"""
+        return self._setting_group_manager
+
+    @property
+    def logs(self):
+        """获取服务端日志管理对象。"""
+        return self._log_manager
 
     def set_du_descriptions(self, descriptions: dict[str, str]) -> None:
         """存储 DO 的 dU 描述值，服务器运行后自动应用

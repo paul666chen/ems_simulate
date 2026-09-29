@@ -41,6 +41,22 @@
             @icd-file-change="handleIcdFileChange"
             @point-mode-change="(mode) => (dlt645PointMode = mode)"
           />
+
+          <el-divider content-position="left">{{
+            $t("device.changeTrackingConfig")
+          }}</el-divider>
+          <el-form-item :label="$t('device.changeTrackingEnabled')">
+            <el-switch
+              v-model="form.change_tracking_enabled"
+              :disabled="saving || loadingChannel"
+            />
+          </el-form-item>
+          <el-alert
+            :title="$t('device.changeTrackingTip')"
+            type="info"
+            :closable="false"
+            show-icon
+          />
         </el-tab-pane>
 
         <el-tab-pane :label="$t('addDevice.tabProtocol')" name="protocol">
@@ -72,7 +88,7 @@
       </el-tabs>
 
       <!-- 操作进度条 -->
-      <div v-if="saving" class="icd-import-progress">
+      <div v-if="saving" ref="importProgressRef" class="icd-import-progress">
         <el-progress
           :percentage="100"
           :indeterminate="true"
@@ -244,8 +260,13 @@ import {
 } from "@/utils/dlt645PointMode";
 import {
   getTlsMaterialRequirements,
+  normalizeTlsVersion,
   shouldSaveChannelSecurity,
 } from "@/utils/channelEdit";
+import {
+  isSerialConnectionType,
+  TLS_SUPPORTED_PROTOCOLS,
+} from "@/constants/protocol";
 
 const props = defineProps<{
   visible: boolean;
@@ -282,7 +303,6 @@ const caCertificateFile = ref<File | null>(null);
 const deviceGroupOptions = ref<DeviceGroupInfo[]>([]);
 const serialPorts = ref<Array<{ device: string; description: string }>>([]);
 const protocols = ref<ProtocolOption[]>([]);
-const TLS_SUPPORTED_PROTOCOLS = new Set([1, 2, 4]);
 const protocolParams = reactive({
   schema_version: 1,
   values: {} as Record<string, number | boolean | string>,
@@ -290,6 +310,7 @@ const protocolParams = reactive({
 const securityConfig = reactive<SecurityConfig>({
   tls_enabled: false,
   tls_mode: "one_way",
+  tls_version: "1.2",
   certificate_configured: false,
   certificate_filename: null,
   private_key_configured: false,
@@ -300,6 +321,7 @@ const securityConfig = reactive<SecurityConfig>({
 const originalSecuritySettings = ref({
   tls_enabled: false,
   tls_mode: "one_way" as SecurityConfig["tls_mode"],
+  tls_version: "1.2" as NonNullable<SecurityConfig["tls_version"]>,
 });
 
 // GOOSE 预览状态
@@ -310,6 +332,7 @@ const previewDone = ref(false);
 
 // 操作进度
 const saving = ref(false);
+const importProgressRef = ref<HTMLElement | null>(null);
 const loadingChannel = ref(false);
 const progressText = ref("");
 const importElapsed = ref(0);
@@ -319,6 +342,7 @@ let channelLoadRequest = 0;
 const defaultSecurityConfig = (): SecurityConfig => ({
   tls_enabled: false,
   tls_mode: "one_way",
+  tls_version: "1.2",
   certificate_configured: false,
   certificate_filename: null,
   private_key_configured: false,
@@ -334,6 +358,8 @@ const applyPersistedSecurityConfig = (persisted?: SecurityConfig) => {
     // 兼容旧数据库；basic 已整改为会校验 CA 的单向 TLS。
     tls_mode:
       (persisted?.tls_mode as string) === "mutual" ? "mutual" : "one_way",
+    // 旧数据库没有版本字段，统一回落到 TLS 1.2。
+    tls_version: normalizeTlsVersion(persisted?.tls_version),
     // 开关只认后端持久化的布尔值，不根据证书或本地点击状态推断。
     tls_enabled:
       persisted?.tls_enabled === true &&
@@ -384,6 +410,7 @@ const form = reactive<ChannelCreateRequest>({
   group_id: null,
   protocol_params: protocolParams,
   dlt645_point_mode: "standard",
+  change_tracking_enabled: false,
 });
 
 const rules = computed<FormRules>(() => {
@@ -496,6 +523,7 @@ const loadChannelData = async (id: number) => {
     const data = await getChannel(id);
     if (!data || requestId !== channelLoadRequest) return;
     Object.assign(form, data);
+    form.change_tracking_enabled = data.change_tracking_enabled ?? false;
     originalDlt645PointMode.value = normalizeDlt645PointMode(
       data.dlt645_point_mode,
     );
@@ -512,10 +540,12 @@ const loadChannelData = async (id: number) => {
     originalSecuritySettings.value = {
       tls_enabled: securityConfig.tls_enabled,
       tls_mode: securityConfig.tls_mode,
+      tls_version: securityConfig.tls_version ?? "1.2",
     };
     originalName.value = data.name || "";
-    mediaType.value =
-      data.conn_type === 0 || data.conn_type === 3 ? "serial" : "network";
+    mediaType.value = isSerialConnectionType(data.conn_type)
+      ? "serial"
+      : "network";
     // 让子组件先在 loading 状态下完成协议类型与持久化参数的同一轮渲染，
     // 避免协议切换监听器把刚回填的认证配置重置为默认值。
     await nextTick();
@@ -545,12 +575,14 @@ const resetForm = () => {
     group_id: null,
     protocol_params: protocolParams,
     dlt645_point_mode: "standard",
+    change_tracking_enabled: false,
   });
   applyPersistedProtocolParams();
   applyPersistedSecurityConfig();
   originalSecuritySettings.value = {
     tls_enabled: false,
     tls_mode: "one_way",
+    tls_version: "1.2",
   };
   clearPendingPointFiles();
   goosePreviewData.value = null;
@@ -639,6 +671,9 @@ const handleSubmit = async () => {
     }
   }
   form.protocol_params = protocolParams;
+  // TreeSelect 清空时部分 Element Plus 版本会返回 undefined；显式提交 null
+  // 才能让后台区分“移到未分组”和“未修改分组”。
+  if (form.group_id === undefined) form.group_id = null;
   // DLT645 电表地址统一为 12 位数字（补零后校验）
   if (form.protocol_type === 3) {
     form.rtu_addr = String(form.rtu_addr || "").padStart(12, "0");
@@ -666,13 +701,22 @@ const handleSubmit = async () => {
         tlsSupported: tlsSupportedProtocol.value,
         tlsEnabled: securityConfig.tls_enabled,
         tlsMode: securityConfig.tls_mode,
+        tlsVersion: securityConfig.tls_version ?? "1.2",
         originalTlsEnabled: originalSecuritySettings.value.tls_enabled,
         originalTlsMode: originalSecuritySettings.value.tls_mode,
+        originalTlsVersion: originalSecuritySettings.value.tls_version,
         hasNewFiles: hasNewSecurityFiles,
       });
 
       // 1. 保存通道
       progressText.value = t("addDevice.savingChannel");
+      // 等待进度区域渲染后滚动到可见位置，让后续点表导入状态始终有明确反馈。
+      await nextTick();
+      importProgressRef.value?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+        inline: "nearest",
+      });
       if (isEditMode.value && props.channelId) {
         // When TLS also changed, its endpoint performs the single required reload.
         await updateChannel(props.channelId, form, shouldSaveSecurity);
@@ -689,6 +733,7 @@ const handleSubmit = async () => {
           resultId,
           securityConfig.tls_enabled,
           securityConfig.tls_mode,
+          securityConfig.tls_version ?? "1.2",
           certificateFile.value,
           privateKeyFile.value,
           caCertificateFile.value,
@@ -697,6 +742,7 @@ const handleSubmit = async () => {
         originalSecuritySettings.value = {
           tls_enabled: securityConfig.tls_enabled,
           tls_mode: securityConfig.tls_mode,
+          tls_version: securityConfig.tls_version ?? "1.2",
         };
       }
 

@@ -12,8 +12,10 @@ class SimulationController:
         self.device = device
         self._simulation_thread = None  # 单线程控制
         self._stop_event = threading.Event()  # 线程停止信号
+        # IEC61850 重建设备时模型尚未加载，按测点身份暂存待恢复的设置。
+        self._pending_configuration: dict[tuple, dict] = {}
 
-    def add_point(self, point: Yc | Yx, simulate_method: SimulateMethod, step: int):
+    def add_point(self, point: Yc | Yx, simulate_method: SimulateMethod, step: float, *, is_running: bool = False):
         # IEC61850 标准元数据 DA（品质 q、时标 t、描述 dU）不参与模拟
         from src.enums.modbus_def import ProtocolType
 
@@ -21,7 +23,47 @@ class SimulationController:
             addr = str(point.hex_address)
             if addr.endswith(".q") or addr.endswith(".t") or addr.endswith(".dU"):
                 return
-        self.points[point] = PointSimulator(point, simulate_method, step)
+        simulator = PointSimulator(point, simulate_method, step)
+        simulator.is_running = is_running
+        self.points[point] = simulator
+        self._restore_point_configuration(point, simulator)
+
+    @staticmethod
+    def _configuration_key(point) -> tuple:
+        return (str(point.rtu_addr), point.frame_type, point.code)
+
+    def snapshot_configuration(self) -> dict[tuple, dict]:
+        """复制模拟设置，不携带旧测点引用、线程或波形执行进度。"""
+        configs = {key: dict(value) for key, value in self._pending_configuration.items()}
+        for point, simulator in tuple(self.points.items()):
+            config = {
+                field: getattr(simulator, field)
+                for field in ("simulate_method", "step", "fixed_value", "is_running", "cycle", "phase", "ramp_time")
+            }
+            if isinstance(point, (Yc, Yt)):
+                config["min_value_limit"] = point.min_value_limit
+                config["max_value_limit"] = point.max_value_limit
+            configs[self._configuration_key(point)] = config
+        return configs
+
+    def restore_configuration(self, configs: dict[tuple, dict], *, defer_missing: bool = False) -> None:
+        """恢复相同测点的设置；新测点保留默认值，延迟加载的模型可稍后恢复。"""
+        self._pending_configuration = {key: dict(value) for key, value in configs.items()}
+        for point, simulator in tuple(self.points.items()):
+            self._restore_point_configuration(point, simulator)
+        if not defer_missing:
+            self._pending_configuration.clear()
+
+    def _restore_point_configuration(self, point, simulator: PointSimulator) -> None:
+        config = self._pending_configuration.pop(self._configuration_key(point), None)
+        if config is None:
+            return
+        for field, value in config.items():
+            if field in ("min_value_limit", "max_value_limit"):
+                if isinstance(point, (Yc, Yt)):
+                    setattr(point, field, value)
+            else:
+                setattr(simulator, field, value)
 
     def set_all_point_simulate_method(self, simulate_method: SimulateMethod):
         for point_simulator in self.points.values():
@@ -53,7 +95,9 @@ class SimulationController:
                 if item.get("simulate_method") is not None:
                     simulator.simulate_method = SimulateMethod(item["simulate_method"])
                 if item.get("step") is not None:
-                    simulator.step = int(item["step"])
+                    simulator.step = float(item["step"])
+                if item.get("fixed_value") is not None:
+                    simulator.fixed_value = float(item["fixed_value"])
                 if item.get("enabled") is not None:
                     simulator.is_running = bool(item["enabled"])
                 applied.append(point_code)
@@ -85,12 +129,22 @@ class SimulationController:
         log.error(f"未找到点 {point_code}")
         return False
 
-    def set_single_point_step(self, point_code: str, step: int):
+    def set_single_point_step(self, point_code: str, step: float):
         """设置单个点的模拟步长"""
         for point, simulator in self.points.items():
             if point.code == point_code:
-                simulator.step = step
+                simulator.step = float(step)
                 log.info(f"设置点 {point_code} 的模拟步长为 {step}")
+                return True
+        log.error(f"未找到点 {point_code}")
+        return False
+
+    def set_single_point_fixed_value(self, point_code: str, fixed_value: float | int) -> bool:
+        """设置单个点的定值模拟目标值"""
+        for point, simulator in self.points.items():
+            if point.code == point_code:
+                simulator.fixed_value = float(fixed_value)
+                log.info(f"设置点 {point_code} 的模拟定值为 {fixed_value}")
                 return True
         log.error(f"未找到点 {point_code}")
         return False
@@ -109,6 +163,7 @@ class SimulationController:
                     "value": point.real_value if isinstance(point, (Yc, Yt)) else point.value,
                     "simulate_method": simulator.simulate_method.value,
                     "step": simulator.step,
+                    "fixed_value": simulator.fixed_value,
                     "is_running": simulator.is_running,
                     "frame_type": point.frame_type,
                     "iec_type_id": getattr(point, "iec_type_id", None),

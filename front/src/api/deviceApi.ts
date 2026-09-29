@@ -20,6 +20,10 @@ export interface MessageRecord {
   protocol_type: string;
   /** Modbus Unit ID or IEC104 common address; control frames have no slave ID. */
   slave_id: number | null;
+  fragment_correlation_id?: string | null;
+  transport_sequence?: number | null;
+  transport_first?: boolean | null;
+  transport_final?: boolean | null;
 }
 
 export interface AvgTimeStats {
@@ -89,6 +93,7 @@ export interface SimulationConfigItem {
   frame_type?: number | null;
   simulate_method: string;
   step: number;
+  fixed_value: number;
   enabled: boolean;
 }
 
@@ -111,12 +116,12 @@ export async function getSimulationConfig(
   }
 }
 
-/** 批量应用测点模拟配置（开始模拟前调用） */
+/** 批量应用测点模拟配置（保存或开始模拟时调用） */
 export async function applySimulationConfig(
   deviceName: string,
   points: Pick<
     SimulationConfigItem,
-    "point_code" | "enabled" | "simulate_method" | "step"
+    "point_code" | "enabled" | "simulate_method" | "step" | "fixed_value"
   >[],
 ): Promise<SimulationConfigApplyResult> {
   try {
@@ -182,9 +187,11 @@ export async function getDeviceTable(
   iec104Types: string[] = [],
   dlt645Prefix: number | null = null,
   dlt645Settlement: number | null = null,
+  dnp3EventClass: number | null = null,
+  dnp3EventEnabled: boolean | null = null,
 ): Promise<Map<string, any>> {
   try {
-    const data = await requestApi(DEVICE_API.TABLE, "post", {
+    const payload: Record<string, unknown> = {
       device_name: deviceName,
       slave_id: slaveId,
       point_name: pointName,
@@ -196,7 +203,14 @@ export async function getDeviceTable(
       iec104_types: iec104Types,
       dlt645_prefix: dlt645Prefix,
       dlt645_settlement: dlt645Settlement,
-    });
+    };
+    if (dnp3EventClass !== null) {
+      payload.dnp3_event_class = dnp3EventClass;
+    }
+    if (dnp3EventEnabled !== null) {
+      payload.dnp3_event_enabled = dnp3EventEnabled;
+    }
+    const data = await requestApi(DEVICE_API.TABLE, "post", payload);
     return new Map<string, any>(Object.entries(data));
   } catch (error) {
     console.error("Error get device table:", error);
@@ -206,7 +220,55 @@ export async function getDeviceTable(
 
 // ===== 自动读取控制 =====
 
-export async function getAutoReadStatus(deviceName: string): Promise<boolean> {
+export type AutoReadMode = "batch" | "single" | "dataset";
+export type AutoReadState = "idle" | "running" | "stopping" | "failed";
+
+export interface AutoReadConfig {
+  mode: AutoReadMode;
+  cycle_interval_ms: number;
+  request_interval_ms?: number;
+  slave_id?: number;
+  channel_id?: number;
+  category?: string;
+  item?: string;
+  point_types?: number[];
+  dlt645_prefix?: number | null;
+  dlt645_settlement?: number | null;
+}
+
+export interface AutoReadStatus {
+  state: AutoReadState;
+  task_id: string | null;
+  mode: AutoReadMode | null;
+  config: AutoReadConfig | null;
+  started_at: string | null;
+  last_cycle_at: string | null;
+  cycle_count: number;
+  current: number;
+  total: number;
+  success: number;
+  fail: number;
+  last_error: string | null;
+}
+
+const idleAutoReadStatus = (): AutoReadStatus => ({
+  state: "idle",
+  task_id: null,
+  mode: null,
+  config: null,
+  started_at: null,
+  last_cycle_at: null,
+  cycle_count: 0,
+  current: 0,
+  total: 0,
+  success: 0,
+  fail: 0,
+  last_error: null,
+});
+
+export async function getAutoReadStatus(
+  deviceName: string,
+): Promise<AutoReadStatus> {
   try {
     const data = await requestApi(DEVICE_API.AUTO_READ_STATUS, "post", {
       device_name: deviceName,
@@ -214,14 +276,18 @@ export async function getAutoReadStatus(deviceName: string): Promise<boolean> {
     return data;
   } catch (error) {
     console.error("Error getting auto read status:", error);
-    return false;
+    return idleAutoReadStatus();
   }
 }
 
-export async function startAutoRead(deviceName: string): Promise<boolean> {
+export async function startAutoRead(
+  deviceName: string,
+  config: AutoReadConfig,
+): Promise<AutoReadStatus> {
   try {
     const data = await requestApi(DEVICE_API.START_AUTO_READ, "post", {
       device_name: deviceName,
+      ...config,
     });
     return data;
   } catch (error) {
@@ -230,7 +296,9 @@ export async function startAutoRead(deviceName: string): Promise<boolean> {
   }
 }
 
-export async function stopAutoRead(deviceName: string): Promise<boolean> {
+export async function stopAutoRead(
+  deviceName: string,
+): Promise<AutoReadStatus> {
   try {
     const data = await requestApi(DEVICE_API.STOP_AUTO_READ, "post", {
       device_name: deviceName,
@@ -244,18 +312,35 @@ export async function stopAutoRead(deviceName: string): Promise<boolean> {
 
 export async function manualRead(
   deviceName: string,
-  interval: number = 0,
-): Promise<any> {
+  config: AutoReadConfig,
+): Promise<AutoReadStatus> {
   try {
     const data = await requestApi(DEVICE_API.MANUAL_READ, "post", {
       device_name: deviceName,
-      interval: interval,
+      interval: config.request_interval_ms ?? 0,
+      ...config,
     });
     return data;
   } catch (error) {
     console.error("Error performing manual read:", error);
     throw error;
   }
+}
+
+export async function getManualReadStatus(
+  deviceName: string,
+): Promise<AutoReadStatus> {
+  return await requestApi(DEVICE_API.MANUAL_READ_STATUS, "post", {
+    device_name: deviceName,
+  });
+}
+
+export async function stopManualRead(
+  deviceName: string,
+): Promise<AutoReadStatus> {
+  return await requestApi(DEVICE_API.STOP_MANUAL_READ, "post", {
+    device_name: deviceName,
+  });
 }
 
 export async function iec104Interrogation(
@@ -448,6 +533,13 @@ export interface MessageDetail {
     quantity?: number;
     match_method?: string;
   } | null;
+  fragment_correlation?: {
+    id: string;
+    frame_sequence_ids: number[];
+    transport_sequence: number | null;
+    first: boolean | null;
+    final: boolean | null;
+  };
   warnings: string[];
   errors: string[];
 }

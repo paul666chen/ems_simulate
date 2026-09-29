@@ -1,5 +1,7 @@
 """通道管理 - 设备管理路由（创建启动/重启/重载/复制）"""
 
+import asyncio
+
 from fastapi import APIRouter, Request
 
 from src.config.config import Config
@@ -50,17 +52,22 @@ async def create_and_start_device(req: ChannelIdRequest, request: Request):
     general_device.name = channel_name
 
     if is_client_protocol(channel_protocol_type):
-        # 客户端协议：先连接服务器，再启动数据更新线程
+        # 客户端协议只建立连接；自动读取由用户通过界面显式开启。
         await general_device.start()
-        general_device.data_update_thread.start()
-    elif channel_protocol_type == ProtocolType.Iec61850Server:
-        # IEC61850 服务端: 显式启动 MMS 服务器
+    elif channel_protocol_type in (
+        ProtocolType.Iec61850Server,
+        ProtocolType.Iec101Server,
+        ProtocolType.Dnp3Server,
+    ):
+        # asyncio 服务端均需显式启动监听。
         await general_device.start()
-        log.info(f"IEC 61850 服务端已启动: {channel_name}")
+        log.info(f"{channel_protocol_type.value} 服务端已启动: {channel_name}")
 
     device_controller = request.app.state.device_controller
     device_controller.device_list.append(general_device)
     device_controller.device_map[general_device.name] = general_device
+    mappings = await asyncio.to_thread(PointMappingService.get_all_mappings)
+    await asyncio.to_thread(general_device.set_device_provider, device_controller, mappings)
 
     log.info(f"设备 {channel_name} 创建并启动成功")
     return BaseResponse(message="设备创建并启动成功", data={"device_name": channel_name})
@@ -208,6 +215,7 @@ async def _copy_device(req: CopyDeviceRequest | CopySingleDeviceRequest, request
             rtu_addr=source_channel.get("rtu_addr", "1"),
             timeout=source_channel.get("timeout", 5),
             dlt645_point_mode=source_channel.get("dlt645_point_mode", "import"),
+            change_tracking_enabled=source_channel.get("change_tracking_enabled", False),
             model_name=source_channel.get("model_name"),
             # IEC 61850 models are deep-copied after both ownership IDs exist.
             # Never leave a copied device pointing at the source device's file.
@@ -253,7 +261,7 @@ async def _copy_device(req: CopyDeviceRequest | CopySingleDeviceRequest, request
                 "rtu_addr": point.get("rtu_addr", 1),
                 "reg_addr": point.get("reg_addr", "0"),
                 "func_code": point.get("func_code", 3),
-                "decode_code": point.get("decode_code", "0x41"),
+                "decode_code": point.get("decode_code", "INT32_ABCD"),
                 "iec_common_address": point.get("iec_common_address"),
                 "iec_cot": point.get("iec_cot", 3),
                 "iec_type_id": point.get("iec_type_id"),

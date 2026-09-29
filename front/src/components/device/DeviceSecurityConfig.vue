@@ -47,6 +47,16 @@
           </div>
         </el-form-item>
 
+        <el-form-item :label="$t('device.tlsVersion')" required>
+          <el-radio-group v-model="modelValue.tls_version" :disabled="disabled">
+            <el-radio-button value="1.2">TLS 1.2</el-radio-button>
+            <el-radio-button value="1.3">TLS 1.3</el-radio-button>
+          </el-radio-group>
+          <div class="mode-description">
+            {{ $t("device.tlsVersionDesc") }}
+          </div>
+        </el-form-item>
+
         <el-form-item
           v-if="materialRequirements.identity"
           :label="$t('device.localCert')"
@@ -55,6 +65,7 @@
           <div class="file-config">
             <div class="file-action-row">
               <el-upload
+                class="certificate-upload"
                 ref="certificateUploadRef"
                 action="#"
                 :auto-upload="true"
@@ -93,6 +104,7 @@
           <div class="file-config">
             <div class="file-action-row">
               <el-upload
+                class="certificate-upload"
                 ref="privateKeyUploadRef"
                 action="#"
                 :auto-upload="true"
@@ -131,6 +143,7 @@
           <div class="file-config">
             <div class="file-action-row">
               <el-upload
+                class="certificate-upload"
                 ref="caCertificateUploadRef"
                 action="#"
                 :auto-upload="true"
@@ -171,6 +184,7 @@
 
 <script setup lang="ts">
 import { computed, ref } from "vue";
+import { supportsTlsProtocol } from "@/constants/protocol";
 import type { SecurityConfig } from "@/types/channel";
 import { getTlsMaterialRequirements } from "@/utils/channelEdit";
 
@@ -182,12 +196,7 @@ const props = defineProps<{
   disabled?: boolean;
 }>();
 
-const tlsSupported = computed(
-  () =>
-    props.protocolType === 1 ||
-    props.protocolType === 2 ||
-    props.protocolType === 4,
-);
+const tlsSupported = computed(() => supportsTlsProtocol(props.protocolType));
 const materialRequirements = computed(() =>
   getTlsMaterialRequirements(props.modelValue.tls_mode, props.connType),
 );
@@ -255,10 +264,14 @@ defineExpose({ clearFiles });
 
 .file-action-row {
   display: grid;
-  grid-template-columns: 116px max-content;
+  grid-template-columns: 300px max-content;
   align-items: start;
   column-gap: 12px;
   min-height: 32px;
+}
+
+.certificate-upload {
+  min-width: 0;
 }
 
 .persisted-file {

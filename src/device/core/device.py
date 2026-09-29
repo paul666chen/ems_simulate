@@ -13,10 +13,11 @@ Device 类 - 设备模拟器核心类 (Facade)
 """
 
 import asyncio
-import time
 from typing import Any
 
 from src.config.log.device_logger import DeviceLoggerManager, get_device_logger
+from src.device.auto_read import AutoReadConfig, AutoReadConflictError, AutoReadMode, AutoReadTaskManager, CycleResult
+from src.device.auto_read.task_manager import normalize_dataset_ref
 from src.device.core.data.data_exporter import DataExporter
 from src.device.core.data.data_reader import DataReader
 from src.device.core.message.message_formatter import MessageFormatter
@@ -24,13 +25,12 @@ from src.device.core.point.point_calculator import PointCalculator
 from src.device.core.point.point_manager import PointManager
 from src.device.core.point.point_operator import PointOperator
 from src.device.core.slave_manager import SlaveManager
-from src.device.data_update.data_update_thread import DataUpdateThread
 
 # 协议处理器延迟导入，减少启动时间
 from src.device.protocol import ProtocolHandler
-from src.device.protocol.base_handler import ClientHandler
 from src.device.protocol.dlt645_handler import DLT645ClientHandler, DLT645ServerHandler
 from src.device.protocol.dnp3_handler import DNP3ClientHandler, DNP3ServerHandler
+from src.device.protocol.iec101_handler import IEC101ClientHandler, IEC101ServerHandler
 from src.device.protocol.iec104_handler import IEC104ClientHandler, IEC104ServerHandler
 from src.device.protocol.iec61850_handler import IEC61850ClientHandler, IEC61850ServerHandler
 from src.device.protocol.modbus_handler import ModbusClientHandler, ModbusServerHandler
@@ -47,7 +47,7 @@ class Device:
     所有公开方法签名保持向后兼容。
     """
 
-    def __init__(self, protocol_type: ProtocolType = ProtocolType.ModbusTcp) -> None:
+    def __init__(self, protocol_type: ProtocolType = ProtocolType.ModbusTcpServer) -> None:
         """初始化设备实例
 
         Args:
@@ -74,6 +74,7 @@ class Device:
         self.security_config: dict[str, Any] = {
             "tls_enabled": False,
             "tls_mode": "one_way",
+            "tls_version": "1.2",
             "certificate_path": None,
             "private_key_path": None,
             "ca_certificate_path": None,
@@ -101,7 +102,8 @@ class Device:
 
         # 其他
         self.plan: Any | None = None
-        self.data_update_thread: DataUpdateThread = DataUpdateThread(task=self.update_data)
+        self.auto_read_manager = AutoReadTaskManager(self._run_auto_read_cycle)
+        self.manual_read_manager = AutoReadTaskManager(self._run_auto_read_cycle, repeat=False)
 
     # ===== 只读属性 =====
     @property
@@ -127,6 +129,8 @@ class Device:
     @property
     def server(self):
         """获取底层服务器对象"""
+        if isinstance(self.protocol_handler, (IEC101ServerHandler, IEC104ServerHandler)):
+            return self.protocol_handler.server
         if isinstance(self.protocol_handler, IEC61850ServerHandler):
             return self.protocol_handler.server
         if isinstance(self.protocol_handler, DNP3ServerHandler):
@@ -136,6 +140,8 @@ class Device:
     @property
     def client(self):
         """获取底层客户端对象"""
+        if isinstance(self.protocol_handler, (IEC101ClientHandler, IEC104ClientHandler)):
+            return self.protocol_handler.client
         if isinstance(self.protocol_handler, IEC61850ClientHandler):
             return self.protocol_handler.client
         if isinstance(self.protocol_handler, DNP3ClientHandler):
@@ -159,7 +165,7 @@ class Device:
         from src.device.protocol.iec61850_handler import IEC61850ClientHandler, IEC61850ServerHandler
 
         handler_map = {
-            ProtocolType.ModbusTcp: lambda: ModbusServerHandler(self.log),
+            ProtocolType.ModbusTcpServer: lambda: ModbusServerHandler(self.log),
             ProtocolType.ModbusRtu: lambda: ModbusServerHandler(self.log),
             ProtocolType.ModbusRtuServer: lambda: ModbusServerHandler(self.log),
             ProtocolType.ModbusRtuClient: lambda: ModbusClientHandler(self.log),
@@ -167,6 +173,8 @@ class Device:
             ProtocolType.ModbusTcpClient: lambda: ModbusClientHandler(self.log),
             ProtocolType.Iec104Server: lambda: IEC104ServerHandler(self.log),
             ProtocolType.Iec104Client: lambda: IEC104ClientHandler(self.log),
+            ProtocolType.Iec101Server: lambda: IEC101ServerHandler(self.log),
+            ProtocolType.Iec101Client: lambda: IEC101ClientHandler(self.log),
             ProtocolType.Dlt645Server: lambda: DLT645ServerHandler(self.log),
             ProtocolType.Dlt645Client: lambda: DLT645ClientHandler(self.log),
             ProtocolType.Iec61850Server: lambda: IEC61850ServerHandler(self.log),
@@ -182,6 +190,7 @@ class Device:
     def _build_protocol_config(self) -> dict:
         """构建协议配置字典"""
         return {
+            "channel_id": self.device_id,
             "ip": self.ip,
             "port": self.port,
             "serial_port": self.serial_port,
@@ -219,7 +228,7 @@ class Device:
         self.protocol_handler.add_points(all_points)
 
     # 初始化方法
-    def initModbusTcpServer(self, port: int, protocol_type: ProtocolType = ProtocolType.ModbusTcp) -> None:
+    def initModbusTcpServer(self, port: int, protocol_type: ProtocolType = ProtocolType.ModbusTcpServer) -> None:
         """初始化 Modbus TCP 服务器"""
         self.port = port
         self.protocol_type = protocol_type
@@ -250,6 +259,16 @@ class Device:
     def initIec104Client(self) -> None:
         """初始化 IEC104 客户端"""
         self.protocol_type = ProtocolType.Iec104Client
+        self.initProtocol()
+
+    def initIec101Server(self) -> None:
+        """初始化 IEC101 从站。"""
+        self.protocol_type = ProtocolType.Iec101Server
+        self.initProtocol()
+
+    def initIec101Client(self) -> None:
+        """初始化 IEC101 主站。"""
+        self.protocol_type = ProtocolType.Iec101Client
         self.initProtocol()
 
     def initDlt645Server(self) -> None:
@@ -434,8 +453,7 @@ class Device:
                 self.point_manager.add_point(slave_id, point)
 
                 # 添加到模拟控制器
-                self.simulation_controller.add_point(point, SimulateMethod.Random, 1)
-                self.simulation_controller.set_point_status(point, True)
+                self.simulation_controller.add_point(point, SimulateMethod.Random, 1, is_running=True)
 
                 added_count += 1
 
@@ -506,6 +524,13 @@ class Device:
         # GOOSE 控制块只作为发现结果缓存；订阅必须在设备 GOOSE 页面
         # 选择本机网卡并显式确认，不能在发现回调中产生隐式配置写入。
 
+        # 批次内一次性建立去重索引，避免新增每个测点都扫描已有全表。
+        existing_keys = {
+            (point.address, frame_type)
+            for frame_type in range(4)
+            for point in self.point_manager.get_points_by_type(frame_type)
+        }
+
         for dp in discovered_points:
             if dp.get("_type") == "goose":
                 continue
@@ -514,8 +539,7 @@ class Device:
             dp["ref"]
 
             # 检查是否已存在（根据 address + frame_type 去重）
-            existing = self.point_manager.find_point_by_address_and_type(addr, ft)
-            if existing:
+            if (addr, ft) in existing_keys:
                 continue
 
             # 根据 frame_type 创建对应的 BasePoint 对象
@@ -574,10 +598,10 @@ class Device:
             if point:
                 # 添加到测点管理器
                 self.point_manager.add_point(slave_id, point)
+                existing_keys.add((addr, ft))
 
                 # 添加到模拟控制器
-                self.simulation_controller.add_point(point, SimulateMethod.Random, 1)
-                self.simulation_controller.set_point_status(point, True)
+                self.simulation_controller.add_point(point, SimulateMethod.Random, 1, is_running=True)
 
                 added_count += 1
         if added_count > 0:
@@ -601,7 +625,8 @@ class Device:
     async def stop(self) -> bool:
         """停止设备"""
         try:
-            await asyncio.to_thread(self.data_update_thread.stop, 6.0)
+            await self.auto_read_manager.shutdown()
+            await self.manual_read_manager.shutdown()
             await asyncio.to_thread(self.simulation_controller.stop_simulation, 1.0)
             self.point_calculator.stop()
             if self.protocol_handler:
@@ -612,53 +637,6 @@ class Device:
             return False
 
     # ===== 数据读取（委托给 DataReader） =====
-
-    def update_data(self) -> None:
-        """更新设备数据（使用异步批量读取优化）
-
-        自动读取的后台线程调用此方法，改为使用异步批量读取路径：
-        对于 Modbus 客户端会将连续地址合并为一次请求；
-        对于 IEC61850 客户端会按类型分组批量读取；
-        对于服务端和其他协议回退到逐点读取。
-
-        重要：对于使用 AsyncModbusClient 的客户端，必须通过
-        run_coroutine_threadsafe() 将协程调度到客户端连接时的事件循环上，
-        而不是用 asyncio.run() 创建新的事件循环，否则会导致连接断裂。
-        """
-        try:
-            loop = self._get_event_loop_for_update()
-            if loop and loop.is_running():
-                # 将协程调度到正确的事件循环（客户端连接时所在的循环）
-                future = asyncio.run_coroutine_threadsafe(self._update_data_async(), loop)
-                future.result(timeout=5)  # 最多等待5秒
-            else:
-                # 回退：无可用事件循环时使用 asyncio.run()（兼容非客户端场景）
-                asyncio.run(self._update_data_async())
-        except Exception as e:
-            if self._logger_initialized:
-                self.log.error(f"update_data error: {e}")
-            else:
-                print(f"update_data error: {e}")
-        time.sleep(0.5)
-
-    def _get_event_loop_for_update(self):
-        """获取数据更新应使用的事件循环
-
-        对于客户端协议（使用异步客户端如 AsyncModbusClient），
-        必须使用客户端连接时所在的事件循环，否则 async 操作会失败。
-        """
-        if self.protocol_handler and isinstance(self.protocol_handler, ClientHandler):
-            loop = getattr(self.protocol_handler, "_loop", None)
-            if loop:
-                return loop
-        return None
-
-    async def _update_data_async(self) -> None:
-        """异步批量更新设备数据"""
-        for slave_id in self.slave_id_list:
-            yc_list = self.yc_dict.get(slave_id, [])
-            yx_list = self.yx_dict.get(slave_id, [])
-            await self.getSlaveRegisterValuesAsync(yc_list, yx_list)
 
     def getSlaveRegisterValues(self, yc_list: list[Yc], yx_list: list[Yx]) -> None:
         """从协议处理器获取数据值"""
@@ -672,17 +650,194 @@ class Device:
 
     # ===== 自动读取控制 =====
 
-    def start_auto_read(self) -> bool:
-        """启动自动读取线程"""
-        return self.data_update_thread.start()
+    async def start_auto_read(self, config: AutoReadConfig | None = None) -> dict[str, Any]:
+        """启动由后端托管的自动读取任务。"""
+        if self.manual_read_manager.is_running():
+            raise AutoReadConflictError("批量读取任务运行中，请等待完成或先取消")
+        return await self.auto_read_manager.start(config or AutoReadConfig())
 
-    def stop_auto_read(self) -> None:
-        """停止自动读取线程"""
-        self.data_update_thread.stop()
+    async def stop_auto_read(self, timeout: float = 1.0) -> dict[str, Any]:
+        """请求停止自动读取，并在有界时间内等待任务收口。"""
+        return await self.auto_read_manager.stop(timeout=timeout)
 
     def is_auto_read_running(self) -> bool:
         """检查自动读取是否正在运行"""
-        return self.data_update_thread.is_alive()
+        return self.auto_read_manager.is_running()
+
+    def get_auto_read_status(self) -> dict[str, Any]:
+        """返回不触发协议 IO 的自动读取状态快照。"""
+        return self.auto_read_manager.status()
+
+    async def start_manual_read(self, config: AutoReadConfig) -> dict[str, Any]:
+        """在后台启动一次批量、逐点或 DataSet 手动读取。"""
+        if self.auto_read_manager.is_running():
+            raise AutoReadConflictError("自动读取运行中，请先停止后再执行手动读取")
+        return await self.manual_read_manager.start(config)
+
+    async def stop_manual_read(self, timeout: float = 1.0) -> dict[str, Any]:
+        """取消后台手动读取任务。"""
+        return await self.manual_read_manager.stop(timeout=timeout)
+
+    def get_manual_read_status(self) -> dict[str, Any]:
+        return self.manual_read_manager.status()
+
+    def get_dataset_snapshot(self, dataset_ref: str) -> dict[str, Any]:
+        """返回 DataSet 最近一次显式读取产生的缓存快照。"""
+        return self.auto_read_manager.get_dataset_snapshot(dataset_ref)
+
+    async def read_dataset_once(self, dataset_ref: str) -> dict[str, Any]:
+        """显式读取一个 IEC 61850 DataSet，并更新设备级快照。"""
+        handler = self.protocol_handler
+        if handler is None or not hasattr(handler, "read_dataset_values"):
+            raise ValueError("当前设备不支持 DataSet 读取")
+        resolved_ref = self._resolve_dataset_ref(dataset_ref)
+        async with self.auto_read_manager.read_lock:
+            try:
+                values = await asyncio.to_thread(handler.read_dataset_values, resolved_ref)
+            except Exception as exc:
+                self.auto_read_manager.update_dataset_snapshot(resolved_ref, error=str(exc))
+                raise
+            self.auto_read_manager.update_dataset_snapshot(resolved_ref, values=values)
+            return self.auto_read_manager.get_dataset_snapshot(resolved_ref)
+
+    async def _run_auto_read_cycle(
+        self,
+        config: AutoReadConfig,
+        stop_event: asyncio.Event,
+        progress,
+    ) -> CycleResult:
+        """执行一轮自动读取；循环和生命周期由 AutoReadTaskManager 管理。"""
+        if stop_event.is_set():
+            return CycleResult()
+        if not self.is_protocol_running():
+            raise RuntimeError("设备未连接或未启动")
+
+        if config.mode == AutoReadMode.DATASET:
+            resolved_ref = self._resolve_dataset_ref(config.item)
+            handler = self.protocol_handler
+            if handler is None or not hasattr(handler, "read_dataset_values"):
+                raise RuntimeError("当前设备不支持 DataSet 读取")
+            async with self.auto_read_manager.read_lock:
+                if stop_event.is_set():
+                    return CycleResult()
+                try:
+                    values = await asyncio.to_thread(handler.read_dataset_values, resolved_ref)
+                except Exception as exc:
+                    self.auto_read_manager.update_dataset_snapshot(resolved_ref, error=str(exc))
+                    raise
+                self.auto_read_manager.update_dataset_snapshot(resolved_ref, values=values)
+            progress(len(values), len(values), len(values), 0)
+            return CycleResult(success=len(values), fail=0, total=len(values))
+
+        points = self._select_auto_read_points(config)
+        if not points:
+            raise RuntimeError("没有符合当前配置的可读取测点")
+
+        success = 0
+        fail = 0
+        total = len(points)
+        async with self.auto_read_manager.read_lock:
+            if config.mode == AutoReadMode.SINGLE:
+                for index, point in enumerate(points, start=1):
+                    if stop_event.is_set():
+                        break
+                    value = await self.point_operator.read_single_point_async(point.code, slave_id=point.rtu_addr)
+                    if value is None:
+                        fail += 1
+                    else:
+                        success += 1
+                    progress(index, total, success, fail)
+                    if config.request_interval_ms > 0 and index < total:
+                        try:
+                            await asyncio.wait_for(
+                                stop_event.wait(),
+                                timeout=config.request_interval_ms / 1000.0,
+                            )
+                        except TimeoutError:
+                            pass
+            else:
+                selected_ids = [config.slave_id] if config.slave_id is not None else list(self.slave_id_list)
+                completed = 0
+                selected_codes = {id(point) for point in points}
+                for slave_id in selected_ids:
+                    if stop_event.is_set():
+                        break
+                    yc_list = [point for point in self.yc_dict.get(slave_id, []) if id(point) in selected_codes]
+                    yx_list = [point for point in self.yx_dict.get(slave_id, []) if id(point) in selected_codes]
+
+                    def report_slave_progress(
+                        current,
+                        _slave_total,
+                        slave_success,
+                        slave_fail,
+                        offset=completed,
+                        success_offset=success,
+                        fail_offset=fail,
+                    ):
+                        progress(
+                            offset + current,
+                            total,
+                            success_offset + slave_success,
+                            fail_offset + slave_fail,
+                        )
+
+                    s_count, f_count = await self.data_reader.get_slave_values_async(
+                        yc_list,
+                        yx_list,
+                        interval_ms=config.request_interval_ms,
+                        stop_event=stop_event,
+                        progress_callback=report_slave_progress,
+                    )
+                    success += s_count
+                    fail += f_count
+                    completed += s_count + f_count
+                    progress(completed, total, success, fail)
+        return CycleResult(success=success, fail=fail, total=success + fail)
+
+    def _select_auto_read_points(self, config: AutoReadConfig) -> list[BasePoint]:
+        if config.mode == AutoReadMode.BATCH:
+            point_types = tuple(point_type for point_type in (config.point_types or (0, 1)) if point_type in (0, 1))
+        else:
+            point_types = config.point_types or (0, 1, 2, 3)
+        slave_ids = [config.slave_id] if config.slave_id is not None else list(self.slave_id_list)
+        points: list[BasePoint] = []
+        for slave_id in slave_ids:
+            yc_list, yx_list, yt_list, yk_list = self.point_manager.get_points_by_slave(slave_id)
+            by_type = {0: yc_list, 1: yx_list, 2: yk_list, 3: yt_list}
+            for point_type in point_types:
+                points.extend(by_type.get(point_type, []))
+
+        if config.category and config.category != "DataModel":
+            return []
+        if config.category == "DataModel" and config.item:
+            points = [
+                point
+                for point in points
+                if str(point.address).startswith(f"{config.item}/") or str(point.address).startswith(f"{config.item}.")
+            ]
+
+        def matches_dlt645(point: BasePoint) -> bool:
+            if config.dlt645_prefix is None:
+                return True
+            try:
+                address = int(point.address)
+            except (TypeError, ValueError):
+                return False
+            if (address >> 24) != config.dlt645_prefix:
+                return False
+            return config.dlt645_settlement is None or (address & 0xFF) == config.dlt645_settlement
+
+        return [point for point in points if matches_dlt645(point)]
+
+    def _resolve_dataset_ref(self, dataset_ref: str) -> str:
+        normalized = normalize_dataset_ref(dataset_ref)
+        handler = self.protocol_handler
+        if handler is not None and hasattr(handler, "get_discovered_datasets"):
+            for dataset in handler.get_discovered_datasets():
+                candidate = str(dataset.get("ref") or "")
+                if normalize_dataset_ref(candidate) == normalized or dataset.get("name") == dataset_ref:
+                    return candidate or normalized
+        return normalized
 
     async def single_read(self, event_emitter=None, interval_ms: int | None = 0) -> dict[str, int]:
         """执行单次读取操作
@@ -697,13 +852,14 @@ class Device:
         success_total = 0
         fail_total = 0
 
-        for slave_id in self.slave_id_list:
-            yc_list = self.yc_dict.get(slave_id, [])
-            yx_list = self.yx_dict.get(slave_id, [])
+        async with self.auto_read_manager.read_lock:
+            for slave_id in self.slave_id_list:
+                yc_list = self.yc_dict.get(slave_id, [])
+                yx_list = self.yx_dict.get(slave_id, [])
 
-            s_count, f_count = await self.getSlaveRegisterValuesAsync(yc_list, yx_list, interval_ms=interval_ms)
-            success_total += s_count
-            fail_total += f_count
+                s_count, f_count = await self.getSlaveRegisterValuesAsync(yc_list, yx_list, interval_ms=interval_ms)
+                success_total += s_count
+                fail_total += f_count
 
         return {"success": success_total, "fail": fail_total}
 
@@ -715,29 +871,28 @@ class Device:
 
     async def read_single_point_async(self, point_code: str, slave_id: int | None = None) -> float | str | None:
         """异步读取单个测点的值（读取本地缓存，不发送网络请求）"""
-        return await self.point_operator.read_single_point_async(point_code, slave_id)
+        async with self.auto_read_manager.read_lock:
+            return await self.point_operator.read_single_point_async(point_code, slave_id)
 
     async def active_read_single_point_async(self, point_code: str, slave_id: int | None = None) -> float | str | None:
         """主动读取单个测点的值（发送网络请求获取最新值）"""
-        return await self.point_operator.active_read_single_point_async(point_code, slave_id)
+        async with self.auto_read_manager.read_lock:
+            return await self.point_operator.active_read_single_point_async(point_code, slave_id)
 
     async def send_iec104_interrogation(self) -> bool:
-        """发送 IEC104 总召唤命令(C_IC_NA_1)
+        """发送 IEC101/IEC104 总召唤命令(C_IC_NA_1)
 
-        触发后服务端会发送所有点的最新值，c104 库自动更新本地缓存，
-        然后同步到应用层测点。
+        触发后从站会发送所有点的最新值，并更新应用层测点缓存。
 
         Returns:
             bool: 是否成功发送
         """
-        from src.device.protocol.iec104_handler import IEC104ClientHandler
-
-        if not isinstance(self.protocol_handler, IEC104ClientHandler):
-            self.log.error("仅 IEC104 客户端支持总召唤")
+        if not isinstance(self.protocol_handler, (IEC101ClientHandler, IEC104ClientHandler)):
+            self.log.error("仅 IEC101/IEC104 客户端支持总召唤")
             return False
 
         if not self.protocol_handler.is_running:
-            self.log.error("IEC104 客户端未连接")
+            self.log.error("IEC101/IEC104 客户端未连接")
             return False
 
         # 发送总召唤
@@ -747,9 +902,10 @@ class Device:
             import asyncio
 
             await asyncio.sleep(0.5)
-            # 同步所有从机的缓存值到应用层测点
-            for slave_id in self.slave_id_list:
-                self._sync_iec104_client_values(slave_id)
+            # IEC104 的 c104 点缓存需要显式同步；IEC101 接收回调已实时同步。
+            if isinstance(self.protocol_handler, IEC104ClientHandler):
+                for slave_id in self.slave_id_list:
+                    self._sync_iec104_client_values(slave_id)
             self.log.info("总召唤完成，已同步所有从机数据")
         return result
 
@@ -955,8 +1111,11 @@ class Device:
             self.log.error(f"无效的模拟方法: {simulate_method}")
             return False
 
-    def setSinglePointStep(self, point_code: str, step: int) -> bool:
+    def setSinglePointStep(self, point_code: str, step: float) -> bool:
         return self.simulation_controller.set_single_point_step(point_code, step)
+
+    def setSinglePointFixedValue(self, point_code: str, fixed_value: float | int) -> bool:
+        return self.simulation_controller.set_single_point_fixed_value(point_code, fixed_value)
 
     def setSinglePointStatus(self, point_code: str, is_running: bool) -> bool:
         """按测点编码设置模拟启停状态"""
@@ -973,6 +1132,7 @@ class Device:
                     "frame_type": getattr(point, "frame_type", None),
                     "simulate_method": simulator.simulate_method.value,
                     "step": simulator.step,
+                    "fixed_value": simulator.fixed_value,
                     "enabled": simulator.is_running,
                 }
             )
@@ -1016,8 +1176,7 @@ class Device:
     def initSimulationPointList(self) -> None:
         """初始化模拟点列表"""
         for point in self.point_manager.get_all_points():
-            self.simulation_controller.add_point(point, SimulateMethod.Random, 1)
-            self.simulation_controller.set_point_status(point, True)
+            self.simulation_controller.add_point(point, SimulateMethod.Random, 1, is_running=True)
 
     def setSpecialDataPointValues(self) -> None:
         """设置特殊数据点值（子类可重写）"""
@@ -1025,7 +1184,9 @@ class Device:
 
     # ===== 数据导入导出（委托给 DataExporter） =====
 
-    def importDataPointFromChannel(self, channel_id: int, protocol_type: ProtocolType = ProtocolType.ModbusTcp) -> None:
+    def importDataPointFromChannel(
+        self, channel_id: int, protocol_type: ProtocolType = ProtocolType.ModbusTcpServer
+    ) -> None:
         """从通道导入测点"""
         self.protocol_type = protocol_type
         self.point_manager.import_from_db(channel_id, protocol_type)
@@ -1059,6 +1220,8 @@ class Device:
         iec104_types: list[str] | None = None,
         dlt645_prefix: int | None = None,
         dlt645_settlement: int | None = None,
+        dnp3_event_class: int | None = None,
+        dnp3_event_enabled: bool | None = None,
     ) -> tuple[list[list[str]], int]:
         # 对于 IEC104 客户端，在获取表格数据前同步 c104.Point 的值到内部点
         if self.protocol_type == ProtocolType.Iec104Client and self.protocol_handler:
@@ -1070,6 +1233,7 @@ class Device:
             ProtocolType.ModbusTcpClient,
             ProtocolType.ModbusRtuClient,
             ProtocolType.Iec104Client,
+            ProtocolType.Iec101Client,
             ProtocolType.Dlt645Client,
             ProtocolType.Iec61850Client,
         ]
@@ -1086,6 +1250,10 @@ class Device:
             iec104_types=iec104_types,
             dlt645_prefix=dlt645_prefix,
             dlt645_settlement=dlt645_settlement,
+            dnp3_event_class=dnp3_event_class,
+            dnp3_event_enabled=dnp3_event_enabled,
+            include_dnp3_point_type=self.protocol_type in (ProtocolType.Dnp3Server, ProtocolType.Dnp3Client),
+            include_dnp3_event_class=self.protocol_type in (ProtocolType.Dnp3Server, ProtocolType.Dnp3Client),
         )
 
     def _sync_iec104_client_values(self, slave_id: int) -> None:

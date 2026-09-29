@@ -44,7 +44,7 @@ class ModbusStrategy(ProtocolStrategy):
         return 0  # Modbus 不需要地址偏移
 
     def get_default_decode(self) -> str:
-        return "0x41"  # 默认大端有符号长整型
+        return "INT32_ABCD"  # 默认大端有符号长整型
 
     def get_point_type_mapping(self) -> dict[int, Any]:
         return {
@@ -77,7 +77,7 @@ class IEC104Strategy(ProtocolStrategy):
         return offset_map.get(frame_type, 0)
 
     def get_default_decode(self) -> str:
-        return "0x42"  # IEC104 默认使用浮点数
+        return "FLOAT32_ABCD"  # IEC104 默认使用浮点数
 
     def get_point_type_mapping(self) -> dict[int, Any]:
         """获取帧类型到默认 IEC104 类型的映射（向后兼容）"""
@@ -122,7 +122,7 @@ class DLT645Strategy(ProtocolStrategy):
         return 0  # DLT645 使用数据标识，不需要偏移
 
     def get_default_decode(self) -> str:
-        return "0x20"  # DLT645 使用 BCD 编码
+        return "UINT16_AB"  # DLT645 使用 BCD 编码
 
     def get_point_type_mapping(self) -> dict[int, Any]:
         return {
@@ -144,7 +144,7 @@ class IEC61850Strategy(ProtocolStrategy):
         return 0  # IEC61850 使用逻辑节点路径，不需要数值偏移
 
     def get_default_decode(self) -> str:
-        return "0x42"  # IEC61850 默认使用浮点数
+        return "FLOAT32_ABCD"  # IEC61850 默认使用浮点数
 
     def get_point_type_mapping(self) -> dict[int, Any]:
         # IEC61850 使用逻辑节点和数据对象模型
@@ -164,7 +164,7 @@ class IEC61850Strategy(ProtocolStrategy):
 def get_protocol_strategy(protocol_type: str) -> ProtocolStrategy:
     """根据协议类型获取对应的策略实例"""
     strategy_map = {
-        "ModbusTcp": ModbusStrategy(),
+        "ModbusTcpServer": ModbusStrategy(),
         "ModbusRtu": ModbusStrategy(),
         "ModbusRtuClient": ModbusStrategy(),
         "ModbusRtuServer": ModbusStrategy(),
@@ -172,6 +172,8 @@ def get_protocol_strategy(protocol_type: str) -> ProtocolStrategy:
         "ModbusTcpClient": ModbusStrategy(),
         "Iec104Server": IEC104Strategy(),
         "Iec104Client": IEC104Strategy(),
+        "Iec101Server": IEC104Strategy(),
+        "Iec101Client": IEC104Strategy(),
         "Dlt645Server": DLT645Strategy(),
         "Dlt645Client": DLT645Strategy(),
         "Iec61850": IEC61850Strategy(),

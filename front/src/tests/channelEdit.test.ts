@@ -4,6 +4,8 @@ import {
   applyConnectionTypeDefaults,
   applyProtocolTypeDefaults,
   getTlsMaterialRequirements,
+  normalizeTlsVersion,
+  selectFirstProtocolForConnectionType,
   shouldSaveChannelSecurity,
 } from "@/utils/channelEdit";
 import type { ChannelCreateRequest, ProtocolOption } from "@/types/channel";
@@ -13,8 +15,10 @@ const unchangedEdit = {
   tlsSupported: true,
   tlsEnabled: false,
   tlsMode: "mutual" as const,
+  tlsVersion: "1.2" as const,
   originalTlsEnabled: false,
   originalTlsMode: "mutual" as const,
+  originalTlsVersion: "1.2" as const,
   hasNewFiles: false,
 };
 
@@ -32,6 +36,12 @@ describe("channel edit optimization", () => {
     ).toBe(true);
   });
 
+  it("saves when the TLS version changed", () => {
+    expect(
+      shouldSaveChannelSecurity({ ...unchangedEdit, tlsVersion: "1.3" }),
+    ).toBe(true);
+  });
+
   it("never saves TLS for unsupported protocols", () => {
     expect(
       shouldSaveChannelSecurity({
@@ -41,6 +51,16 @@ describe("channel edit optimization", () => {
         hasNewFiles: true,
       }),
     ).toBe(false);
+  });
+});
+
+describe("normalizeTlsVersion", () => {
+  it("keeps supported versions and falls back to 1.2", () => {
+    expect(normalizeTlsVersion("1.3")).toBe("1.3");
+    expect(normalizeTlsVersion("1.2")).toBe("1.2");
+    expect(normalizeTlsVersion(undefined)).toBe("1.2");
+    expect(normalizeTlsVersion("1.1")).toBe("1.2");
+    expect(normalizeTlsVersion("unknown")).toBe("1.2");
   });
 });
 
@@ -74,6 +94,30 @@ describe("channel edit endpoint hydration", () => {
     applyConnectionTypeDefaults(form, 1);
 
     expect(form.ip).toBe("127.0.0.1");
+  });
+});
+
+describe("media type protocol selection", () => {
+  const protocols: ProtocolOption[] = [
+    { value: 0, label: "Modbus RTU", conn_types: [0, 3] },
+    { value: 1, label: "Modbus TCP", conn_types: [1, 2] },
+    { value: 2, label: "IEC104", conn_types: [1, 2] },
+  ];
+
+  it("replaces a serial protocol with the first network protocol", () => {
+    const form = {
+      code: "serial-device",
+      name: "serial-device",
+      protocol_type: 0,
+      conn_type: 3,
+      ip: "0.0.0.0",
+      port: 502,
+    };
+
+    selectFirstProtocolForConnectionType(form, protocols, 2);
+
+    expect(form.conn_type).toBe(2);
+    expect(form.protocol_type).toBe(1);
   });
 });
 

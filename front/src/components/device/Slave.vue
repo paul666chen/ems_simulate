@@ -152,11 +152,21 @@
                 </el-tooltip>
 
                 <!-- 间隔设置 (批量和逐点都支持，始终显示) -->
-                <span class="auto-read-label">{{ $t("slave.interval") }}</span>
+                <span class="auto-read-label">
+                  {{
+                    $t(
+                      isIec61850 && iec61850Category === "DataSets"
+                        ? "slave.cycleInterval"
+                        : readMode === "single" || isDlt645
+                          ? "slave.pointInterval"
+                          : "slave.cycleInterval",
+                    )
+                  }}
+                </span>
                 <el-select
                   v-if="isIec61850 && iec61850Category === 'DataSets'"
                   v-model="datasetReadInterval"
-                  :placeholder="$t('slave.interval')"
+                  :placeholder="$t('slave.cycleInterval')"
                   allow-create
                   filterable
                   default-first-option
@@ -174,7 +184,13 @@
                 <el-select
                   v-else
                   v-model="readInterval"
-                  :placeholder="$t('slave.interval')"
+                  :placeholder="
+                    $t(
+                      readMode === 'single' || isDlt645
+                        ? 'slave.pointInterval'
+                        : 'slave.cycleInterval',
+                    )
+                  "
                   allow-create
                   filterable
                   default-first-option
@@ -425,7 +441,7 @@ import { useAutoRead } from "@/composables";
 import {
   isDlt645Protocol,
   isIec61850Protocol,
-  isIec104Protocol,
+  isIec60870Protocol,
 } from "@/constants/protocol";
 import { isAutoRefreshPaused } from "@/composables/autoRefreshGate";
 import { TABLE_HEADERS } from "@/constants/table";
@@ -723,7 +739,10 @@ const isIec61850Filtered = computed(() => {
 // IEC104 客户端判断
 const isIec104Client = computed(() => {
   const protocolStr = String(protocolType.value);
-  return isIec104Protocol(protocolStr) && protocolStr === "Iec104Client";
+  return (
+    isIec60870Protocol(protocolStr) &&
+    ["Iec104Client", "Iec101Client"].includes(protocolStr)
+  );
 });
 
 // 总召唤按钮状态
@@ -763,6 +782,21 @@ const iec104Types = computed<string[]>(() => {
         (value: unknown): value is string => typeof value === "string",
       )
     : [];
+});
+
+const dnp3EventFilter = computed<string | null>(() => {
+  const filters = activeFilters.value["DNP3事件类别"];
+  return Array.isArray(filters) && typeof filters[0] === "string"
+    ? filters[0]
+    : null;
+});
+const dnp3EventClass = computed<number | null>(() => {
+  const match = /^class([1-3])$/.exec(dnp3EventFilter.value || "");
+  return match ? Number(match[1]) : null;
+});
+const dnp3EventEnabled = computed<boolean | null>(() => {
+  if (dnp3EventFilter.value === "none") return false;
+  return dnp3EventClass.value === null ? null : true;
 });
 
 const handlePageIndexChange = (idx: number) => {
@@ -913,6 +947,8 @@ const fetchDeviceTable = async (
     iec104Types.value,
     dlt645Prefix.value,
     dlt645Settlement.value,
+    dnp3EventClass.value,
+    dnp3EventEnabled.value,
   );
   if (data) {
     const fetchedTotal = Number(data.get("total") || 0);
@@ -1189,6 +1225,7 @@ watch(
         pageSize.value = 10;
         isAutoRead.value = false;
         await fetchSlaveList();
+        await fetchAutoReadStatus();
         startAutoRefresh();
       } else {
         // 同一设备，若筛选参数变化则重新加载数据

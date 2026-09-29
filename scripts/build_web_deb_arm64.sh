@@ -29,6 +29,7 @@ PY_WORK="${BUILD_DIR}/build_pyinstaller_web"
 VENV_DIR="${BUILD_DIR}/.venv"
 VENV_PY="${VENV_DIR}/bin/python"
 WWW_DIR="${PROJECT_ROOT}/www"
+C104_PYPI_VERSION="${C104_PYPI_VERSION:-2.2.1}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -110,13 +111,34 @@ sed -i "/^Installed-Size:/d" "${DEB_DIR}/DEBIAN/control"
 if [ "${SKIP_BACKEND}" -eq 1 ]; then
     info "跳过 PyInstaller 构建"
 else
-    info "安装 ARM64 后端构建依赖"
-    uv pip install --python "${VENV_PY}" -e "${PROJECT_ROOT}[build]" || die "Python 依赖安装失败"
+    info "根据 uv.lock 安装 ARM64 后端构建依赖（排除仅供其他架构使用的 Git 版 c104）"
+    UV_PROJECT_ENVIRONMENT="${VENV_DIR}" \
+        uv sync \
+            --project "${PROJECT_ROOT}" \
+            --python "${PY}" \
+            --frozen \
+            --no-dev \
+            --no-install-package c104 \
+            --extra build || die "Python 依赖安装失败"
+
+    info "从 PyPI 安装 ARM64 c104 ${C104_PYPI_VERSION}"
+    uv pip install \
+        --python "${VENV_PY}" \
+        --default-index "https://pypi.org/simple" \
+        --only-binary c104 \
+        "c104==${C104_PYPI_VERSION}" || die "PyPI c104 安装失败"
+    "${VENV_PY}" -c \
+        "import importlib.metadata, platform, c104; assert importlib.metadata.version('c104') == '${C104_PYPI_VERSION}'; assert platform.machine() in {'aarch64', 'arm64'}" \
+        || die "PyPI c104 ARM64 校验失败"
+    PYTHONPATH="${PROJECT_ROOT}" "${VENV_PY}" -c \
+        "from src.proto.iec104.iec104server import IEC104Server; server = IEC104Server(ip='127.0.0.1', port=2404); assert not server.connection_monitoring_supported" \
+        || die "PyPI c104 ARM64 IEC104 服务端冒烟测试失败"
 
     info "运行 PyInstaller"
     EMS_PYINSTALLER_MODE=onedir \
     EMS_PYINSTALLER_NAME="${BACKEND_NAME}" \
     EMS_PYINSTALLER_CONTENTS_DIR=_internal \
+    EMS_PYINSTALLER_BUNDLE_CONFIG=0 \
     EMS_PYINSTALLER_DATA_SCOPE=all \
     EMS_PYINSTALLER_CONSOLE=1 \
     uv run --python "${VENV_PY}" --no-project -m PyInstaller \
@@ -141,6 +163,9 @@ fi
 
 info "组装 Debian 包"
 cp -r "${PYINSTALLER_OUTPUT}/." "${INSTALL_DIR}/"
+# 与 x86 Web 包一致：配置只放在程序根目录。
+cp "${PROJECT_ROOT}/config.ini" "${INSTALL_DIR}/config.ini"
+rm -f "${INSTALL_DIR}/_internal/config.ini"
 ln -sf "../share/${APP_NAME}/${BACKEND_NAME}" "${DEB_DIR}/usr/bin/${APP_NAME}"
 
 INSTALLED_SIZE="$(du -s "${INSTALL_DIR}" | cut -f1)"

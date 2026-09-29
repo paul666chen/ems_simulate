@@ -6,6 +6,7 @@
 from dataclasses import dataclass
 from typing import Any
 
+from src.enums.modbus_register import Decode
 from src.enums.points.iec104_quality import IEC104QualityDescriptor
 
 
@@ -13,11 +14,14 @@ from src.enums.points.iec104_quality import IEC104QualityDescriptor
 class ModbusConfig:
     """Modbus 协议配置"""
 
-    decode_code: str = "0x41"  # 解析码（数据格式）
+    decode_code: str = "INT32_ABCD"  # 解析码（数据格式）
     register_count: int = 2  # 寄存器数量
     is_signed: bool = True  # 是否有符号
     byteorder: str = "big"  # 字节序（big/little）
     wordorder: str = "big"  # 字序（big/little）
+
+    def __post_init__(self) -> None:
+        self.decode_code = Decode.normalize(self.decode_code)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -31,7 +35,7 @@ class ModbusConfig:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ModbusConfig":
         return cls(
-            decode_code=data.get("decode_code", "0x41"),
+            decode_code=data.get("decode_code", "INT32_ABCD"),
             register_count=data.get("register_count", 2),
             is_signed=data.get("is_signed", True),
             byteorder=data.get("byteorder", "big"),
@@ -140,7 +144,7 @@ class IEC61850Config:
 def get_default_protocol_config(protocol_type: str) -> Any | None:
     """根据协议类型获取默认配置"""
     config_map = {
-        "ModbusTcp": ModbusConfig(),
+        "ModbusTcpServer": ModbusConfig(),
         "ModbusRtu": ModbusConfig(),
         "ModbusRtuClient": ModbusConfig(),
         "ModbusRtuServer": ModbusConfig(),
@@ -148,6 +152,8 @@ def get_default_protocol_config(protocol_type: str) -> Any | None:
         "ModbusTcpClient": ModbusConfig(),
         "Iec104Server": IEC104Config(),
         "Iec104Client": IEC104Config(),
+        "Iec101Server": IEC104Config(),
+        "Iec101Client": IEC104Config(),
         "Dlt645Server": DLT645Config(),
         "Dlt645Client": DLT645Config(),
         "Iec61850Server": IEC61850Config(),
@@ -159,7 +165,7 @@ def get_default_protocol_config(protocol_type: str) -> Any | None:
 def create_protocol_config(protocol_type: str, data: dict[str, Any]) -> Any | None:
     """根据协议类型和数据创建配置对象"""
     if protocol_type in [
-        "ModbusTcp",
+        "ModbusTcpServer",
         "ModbusRtu",
         "ModbusRtuClient",
         "ModbusRtuServer",
@@ -167,7 +173,7 @@ def create_protocol_config(protocol_type: str, data: dict[str, Any]) -> Any | No
         "ModbusTcpClient",
     ]:
         return ModbusConfig.from_dict(data)
-    elif protocol_type in ["Iec104Server", "Iec104Client"]:
+    elif protocol_type in ["Iec104Server", "Iec104Client", "Iec101Server", "Iec101Client"]:
         return IEC104Config.from_dict(data)
     elif protocol_type in ["Dlt645Server", "Dlt645Client"]:
         return DLT645Config.from_dict(data)

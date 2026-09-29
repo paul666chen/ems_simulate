@@ -9,6 +9,7 @@ import os
 import time
 from typing import Any
 
+from src.device.core.connection import DisconnectInitiator, DisconnectReason
 from src.device.protocol.base_handler import ClientHandler, ServerHandler
 from src.enums.point_data import Yc, Yk, Yt, Yx
 from src.enums.points.base_point import BasePoint
@@ -52,6 +53,7 @@ class IEC61850ServerHandler(ServerHandler):
         from src.proto.iec61850.iec61850_server import IEC61850Server
 
         self._config = config
+        self._configure_connection_monitoring(config, supported=True)
         ip = config.get("ip", "0.0.0.0")
         port = config.get("port", 102)
         model_name = config.get("model_name")
@@ -81,6 +83,9 @@ class IEC61850ServerHandler(ServerHandler):
             file_service_directory=runtime.get("file_service_directory") or None,
             tls_configuration=self._tls_configuration,
         )
+        set_connection_callback = getattr(self._server, "set_connection_callback", None)
+        if callable(set_connection_callback):
+            set_connection_callback(self._on_connection_state_change)
         from src.device.core.message.mms_capture import MmsMessageCapture
 
         if runtime.get("mms_capture_enabled", False):
@@ -173,6 +178,7 @@ class IEC61850ServerHandler(ServerHandler):
         """停止 IEC 61850 服务器"""
         try:
             if self._server:
+                self._close_all_connections()
                 await asyncio.to_thread(self._server.stop)
                 if self._mms_capture:
                     self._mms_capture.stop()
@@ -183,6 +189,36 @@ class IEC61850ServerHandler(ServerHandler):
             if self._log:
                 self._log.error(f"停止 IEC 61850 服务器失败: {e}")
             return False
+
+    def _on_connection_state_change(self, key: str, connected: bool, peer, local) -> None:
+        if connected:
+            security = {"tls": self._tls_configuration is not None}
+            self._open_connection(
+                key,
+                remote_endpoint=peer,
+                local_endpoint=local,
+                security=security,
+            )
+        else:
+            self._close_connection(
+                key,
+                reason=DisconnectReason.REMOTE_CLOSED,
+                initiator=DisconnectInitiator.REMOTE,
+            )
+
+    def get_connection_summary(self) -> dict[str, Any]:
+        # IEC61850 连接指示回调（ctypes）会因同进程客户端持 GIL 导致关联被拒，
+        # 无法始终用于监控；因此在 registry 未记录到会话时，改用轮询
+        # IedServer_getNumberOfOpenConnections 统计连接数兜底（只能提供连接数，
+        # 无逐条 IP/端口/时长，故 detail_monitoring_supported=False）。
+        summary = super().get_connection_summary()
+        summary["detail_monitoring_supported"] = False
+        if self._server:
+            polled = self._server.get_connection_count()
+            if summary.get("current_count", 0) == 0 and polled > 0:
+                summary["current_count"] = polled
+                summary["active_count"] = polled
+        return summary
 
     def read_value(self, point: BasePoint) -> Any:
         """读取测点值"""
@@ -631,6 +667,7 @@ class IEC61850ClientHandler(ClientHandler):
         # 会把数据模型目录绑定到 association；即使 Python 侧模型缓存已清空，
         # 复用旧连接仍可能继续浏览到切换前的模型。
         self._begin_progress("discover", self.PHASE_CONNECTING, 5, "正在重建 MMS 连接")
+        started = time.perf_counter()
 
         try:
             if self._log:
@@ -641,6 +678,7 @@ class IEC61850ClientHandler(ClientHandler):
             self._ensure_mms_capture_started()
             is_connected = self._client.connect(auto_discover=False)
             self._is_running = is_connected
+            connected_at = time.perf_counter()
             if not is_connected:
                 message = "重新建立 MMS 连接失败"
                 self._finish_progress(False, message)
@@ -669,6 +707,7 @@ class IEC61850ClientHandler(ClientHandler):
                 self._update_progress(self.PHASE_DISCOVERING, percent, message)
 
             success = self._client.remote_discover_model(progress=on_discovery_progress)
+            discovered_at = time.perf_counter()
             if not success:
                 self._finish_progress(False, "远程模型发现失败")
                 return False
@@ -694,12 +733,12 @@ class IEC61850ClientHandler(ClientHandler):
                     )
 
             # 缓存报告控制块
-            self._update_progress(self.PHASE_DISCOVERING, 92, "正在发现报告控制块")
+            self._update_progress(self.PHASE_DISCOVERING, 92, "正在整理报告控制块")
             self._discovered_rcbs.clear()
             client = getattr(self, "_client", None)
             if client and getattr(client, "reports", None):
                 try:
-                    self._discovered_rcbs.extend(client.reports.discover_rcbs())
+                    self._discovered_rcbs.extend(client.get_discovered_rcbs())
                     if self._discovered_rcbs and self._log:
                         self._log.info(f"发现 {len(self._discovered_rcbs)} 个报告控制块")
                 except Exception as e:
@@ -707,6 +746,7 @@ class IEC61850ClientHandler(ClientHandler):
                         self._log.warning(f"缓存 RCB 失败: {e}")
 
             # 通知上层发现的测点
+            resources_at = time.perf_counter()
             self._update_progress(self.PHASE_DISCOVERING, 96, "正在刷新测点")
             if self._on_points_discovered:
                 discovered = self._client.get_discovered_points()
@@ -718,6 +758,14 @@ class IEC61850ClientHandler(ClientHandler):
                             self._log.error(f"处理发现的测点时出错: {e}")
 
             self._model_loaded = True
+            if self._log:
+                self._log.info(
+                    f"IEC61850 discovery stages: connect={(connected_at - started) * 1000:.2f}ms, "
+                    f"model={(discovered_at - connected_at) * 1000:.2f}ms, "
+                    f"resources={(resources_at - discovered_at) * 1000:.2f}ms, "
+                    f"register={(time.perf_counter() - resources_at) * 1000:.2f}ms, "
+                    f"total={(time.perf_counter() - started) * 1000:.2f}ms"
+                )
             self._finish_progress(True, "远程模型发现完成")
             return True
         except Exception as e:

@@ -4,26 +4,26 @@ IEC104 协议处理器
 支持多 Station（多从站/多公共地址）
 """
 
+from __future__ import annotations
+
 import asyncio
+from datetime import UTC, datetime
 import time
 from typing import Any
 
 import c104
 
 from src.config.config import Config
+from src.device.core.connection import ConnectionState, DisconnectInitiator, DisconnectReason
 from src.device.protocol.base_handler import ClientHandler, ServerHandler
-from src.enums.modbus_register import Decode
+from src.device.protocol.iec60870_common import decode_point_value, resolve_asdu_type
 from src.enums.point_data import Yc, Yk, Yt, Yx
 from src.enums.points.base_point import BasePoint
 from src.enums.points.iec104_quality import (
     encode_quality_for_c104,
     supports_quality,
 )
-from src.enums.points.iec104_type import (
-    decode_iec104_value,
-    encode_iec104_value,
-    resolve_iec104_type,
-)
+from src.enums.points.iec104_type import encode_iec104_value
 
 
 def _resolve_c104_type(point: BasePoint) -> c104.Type:
@@ -35,27 +35,21 @@ def _resolve_c104_type(point: BasePoint) -> c104.Type:
     Returns:
         c104.Type 枚举值
     """
-    iec_type = resolve_iec104_type(point.iec_type_id, point.frame_type)
+    iec_type = resolve_asdu_type(point)
     # c104 库使用 TypeID 字符串作为属性名映射到 c104.Type
     return getattr(c104.Type, iec_type.value)
 
 
-def _decode_c104_point_value(point: BasePoint, value: Any) -> Any:
-    """Convert a c104 value to the raw value stored by a point.
+_decode_c104_point_value = decode_point_value
 
-    This follows the same boundary as Modbus handlers: protocol handlers only
-    encode/decode wire values, while Yc/Yt apply mul_coe/add_coe when their
-    ``value`` property updates ``real_value``.
+
+def _c104_connection_time_utc(value: datetime | None) -> datetime | None:
+    """Normalize c104's native local datetime before registry storage.
+
+    The chrono binding returns local wall time without tzinfo. astimezone
+    interprets that in the host timezone and also handles aware values.
     """
-    if isinstance(point, (Yx, Yk)):
-        return int(bool(value))
-    if isinstance(point, (Yc, Yt)):
-        decoded = decode_iec104_value(value, point.iec_type_id)
-        info = Decode.get_info(point.decode)
-        if info.is_float:
-            return float(decoded)
-        return int(round(decoded))
-    return value
+    return value.astimezone(UTC) if value is not None else None
 
 
 class IEC104ServerHandler(ServerHandler):
@@ -67,6 +61,9 @@ class IEC104ServerHandler(ServerHandler):
         self._log = log
         # 命令点 (common_address, IOA) → BasePoint 映射，用于收到客户端命令后更新应用层点值
         self._command_point_map: dict[tuple[int, int], BasePoint] = {}
+        # 连接级实时流量：key -> (rx_bytes, tx_bytes, rx_frames, tx_frames) 上次快照
+        self._traffic_snapshot: dict[str, tuple[int, int, int, int]] = {}
+        self._traffic_task = None
 
     def initialize(self, config: dict[str, Any]) -> None:
         """初始化 IEC104 服务器
@@ -99,6 +96,16 @@ class IEC104ServerHandler(ServerHandler):
             max_connections=runtime.get("max_connections", 0),
             transport_security=build_transport_security(security),
             one_way_tls_config=load_one_way_tls_config(security, client=False),
+            connection_history_size=100,
+        )
+        self._server.set_connection_state_callback(self._on_connection_state_change)
+
+        # 连接监控是否可用，取决于当前 c104 是否编译了连接监控回调。
+        # 某些平台（如 ARM）的 c104 裁剪版没有这些回调：此时监控关闭，
+        # 但 IEC104 设备本身（Station/测点/读写）仍正常工作。
+        self._configure_connection_monitoring(
+            config,
+            supported=self._server.connection_monitoring_supported,
         )
 
         # 预创建所有从站对应的 Station（common_address = slave_id）
@@ -112,6 +119,8 @@ class IEC104ServerHandler(ServerHandler):
             if self._server:
                 self._server.start()
                 self._is_running = True
+                if self._connection_monitoring_supported:
+                    self._start_traffic_poller()
                 return True
             return False
         except Exception as e:
@@ -123,6 +132,8 @@ class IEC104ServerHandler(ServerHandler):
         """停止 IEC104 服务器"""
         try:
             if self._server and hasattr(self._server, "stop"):
+                self._stop_traffic_poller()
+                self._close_all_connections()
                 self._server.stop()
                 self._is_running = False
                 return True
@@ -131,6 +142,123 @@ class IEC104ServerHandler(ServerHandler):
             if self._log:
                 self._log.error(f"停止 IEC104 服务器失败: {e}")
             return False
+
+    def _start_traffic_poller(self) -> None:
+        self._stop_traffic_poller()
+        self._traffic_task = asyncio.ensure_future(self._poll_connection_traffic())
+
+    def _stop_traffic_poller(self) -> None:
+        if self._traffic_task is not None:
+            self._traffic_task.cancel()
+            self._traffic_task = None
+
+    async def _poll_connection_traffic(self) -> None:
+        """Periodically read each connection's live byte counters and record deltas.
+
+        c104's ``ServerConnection`` exposes per-connection ``bytes_received`` /
+        ``bytes_sent`` / ``frames_received`` / ``frames_sent`` counters that update
+        live while the session is open, so we snapshot them and feed the deltas to
+        the shared registry (which only accepts additive amounts).
+        """
+        try:
+            while self._is_running and self._server is not None:
+                await asyncio.sleep(2)
+                try:
+                    connections = list(getattr(self._server.server, "connections", None) or [])
+                except Exception:
+                    connections = []
+                for con in connections:
+                    key = f"iec104:{getattr(con, 'id', None)}"
+                    if key not in self._connection_sessions:
+                        continue
+                    try:
+                        rx = int(getattr(con, "bytes_received", 0) or 0)
+                        tx = int(getattr(con, "bytes_sent", 0) or 0)
+                        frx = int(getattr(con, "frames_received", 0) or 0)
+                        ftx = int(getattr(con, "frames_sent", 0) or 0)
+                    except Exception:
+                        continue
+                    last = self._traffic_snapshot.get(key)
+                    if last is None:
+                        self._traffic_snapshot[key] = (rx, tx, frx, ftx)
+                        continue
+                    if (rx, tx, frx, ftx) == last:
+                        continue
+                    self._traffic_snapshot[key] = (rx, tx, frx, ftx)
+                    lrx, ltx, lfrx, lftx = last
+                    self._record_connection_activity(
+                        key,
+                        rx_bytes=max(0, rx - lrx),
+                        tx_bytes=max(0, tx - ltx),
+                        rx_messages=max(0, frx - lfrx),
+                        tx_messages=max(0, ftx - lftx),
+                    )
+        except asyncio.CancelledError:
+            pass
+
+    def _on_connection_state_change(
+        self,
+        server: c104.Server,
+        connection: c104.ServerConnection,
+        state: c104.ServerConnectionState,
+    ) -> None:
+        """Translate the fork's exact per-connection lifecycle into the shared registry."""
+        key = f"iec104:{connection.id}"
+        if state == c104.ServerConnectionState.ESTABLISHED:
+            security = {
+                "tls": bool(connection.is_secure),
+                "version": connection.tls_version,
+                "cipher": connection.cipher_suite,
+                "client_certificate_sha256": connection.client_certificate_sha256,
+                "observed_remote_ip": connection.observed_remote_ip,
+                "observed_remote_port": connection.observed_remote_port,
+                "correlation_id": connection.correlation_id,
+            }
+            self._open_connection(
+                key,
+                remote_endpoint=(connection.remote_ip, connection.remote_port),
+                local_endpoint=(connection.local_ip, connection.local_port),
+                security={name: value for name, value in security.items() if value not in (None, "")},
+                connected_at=_c104_connection_time_utc(connection.connected_at),
+            )
+            return
+        if state == c104.ServerConnectionState.ACTIVE:
+            self._update_connection(key, state=ConnectionState.ACTIVE)
+            return
+        if state == c104.ServerConnectionState.INACTIVE:
+            self._update_connection(key, state=ConnectionState.IDLE)
+            return
+        if state not in (c104.ServerConnectionState.CLOSED, c104.ServerConnectionState.FAILED):
+            return
+
+        reason_map = {
+            "REMOTE_OR_IO_ERROR": (DisconnectReason.REMOTE_CLOSED, DisconnectInitiator.REMOTE),
+            "LOCAL_REQUEST": (DisconnectReason.SERVER_STOPPED, DisconnectInitiator.SERVER),
+            "SERVER_STOPPED": (DisconnectReason.SERVER_STOPPED, DisconnectInitiator.SERVER),
+            "PROTOCOL_ERROR": (DisconnectReason.PROTOCOL_ERROR, DisconnectInitiator.REMOTE),
+            "T1_TIMEOUT": (DisconnectReason.IDLE_TIMEOUT, DisconnectInitiator.SERVER),
+            "T3_TIMEOUT": (DisconnectReason.IDLE_TIMEOUT, DisconnectInitiator.SERVER),
+            "SECURITY_ERROR": (DisconnectReason.AUTHENTICATION_FAILED, DisconnectInitiator.SERVER),
+            "TLS_HANDSHAKE_FAILED": (DisconnectReason.TLS_HANDSHAKE_FAILED, DisconnectInitiator.SERVER),
+        }
+        reason, initiator = reason_map.get(
+            connection.close_reason.name,
+            (DisconnectReason.UNKNOWN, DisconnectInitiator.UNKNOWN),
+        )
+        self._close_connection(
+            key,
+            reason=reason,
+            initiator=initiator,
+            detail=connection.error_message,
+            disconnected_at=_c104_connection_time_utc(connection.disconnected_at),
+            final_stats={
+                "rx_bytes": connection.bytes_received,
+                "tx_bytes": connection.bytes_sent,
+                "rx_messages": connection.frames_received,
+                "tx_messages": connection.frames_sent,
+                "error_count": int(connection.error_code != 0),
+            },
+        )
 
     def read_value(self, point: BasePoint) -> Any:
         """读取测点值"""

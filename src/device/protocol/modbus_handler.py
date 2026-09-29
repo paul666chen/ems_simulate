@@ -9,6 +9,7 @@ import time
 from typing import Any
 
 from src.config.config import Config
+from src.device.core.connection import DisconnectInitiator, DisconnectReason
 from src.device.protocol.base_handler import ClientHandler, ServerHandler
 from src.enums.modbus_def import ProtocolType
 from src.enums.points.base_point import BasePoint
@@ -42,7 +43,11 @@ class ModbusServerHandler(ServerHandler):
         self._config = config
         port = config.get("port", Config.DEFAULT_PORT)
         self._slave_id_list = config.get("slave_id_list", [1])
-        protocol_type = config.get("protocol_type", ProtocolType.ModbusTcp)
+        protocol_type = config.get("protocol_type", ProtocolType.ModbusTcpServer)
+        self._configure_connection_monitoring(
+            config,
+            supported=protocol_type in (ProtocolType.ModbusTcpServer, ProtocolType.ModbusRtuOverTcp),
+        )
         security = config.get("security", {})
         runtime = config.get("runtime", {})
 
@@ -68,11 +73,15 @@ class ModbusServerHandler(ServerHandler):
             parity=parity,
             tls_enabled=bool(security.get("tls_enabled")),
             tls_mode=str(security.get("tls_mode") or "one_way"),
+            tls_version=str(security.get("tls_version") or "1.2"),
             certificate_path=security.get("certificate_path"),
             private_key_path=security.get("private_key_path"),
             ca_certificate_path=security.get("ca_certificate_path"),
             client_idle_timeout=runtime.get("client_idle_timeout_ms", 0) / 1000,
             max_connections=runtime.get("max_connections", 0),
+            on_connection_opened=self._on_connection_opened,
+            on_connection_activity=self._on_connection_activity,
+            on_connection_closed=self._on_connection_closed,
         )
         # 设置回调函数，用于处理来自 Modbus 客户端的写入请求，记录测点变化日志
         self._server.on_write_callback = self._on_modbus_client_write
@@ -90,10 +99,37 @@ class ModbusServerHandler(ServerHandler):
                 self._log.error(f"启动 Modbus 服务器失败: {e}")
             return False
 
+    def _on_connection_opened(self, key, remote_endpoint, local_endpoint, security) -> None:
+        self._open_connection(
+            key,
+            remote_endpoint=remote_endpoint,
+            local_endpoint=local_endpoint,
+            security=security,
+        )
+
+    def _on_connection_activity(self, key, direction: str, size: int) -> None:
+        if direction == "rx":
+            self._record_connection_activity(key, rx_bytes=size, rx_messages=1)
+        else:
+            self._record_connection_activity(key, tx_bytes=size, tx_messages=1)
+
+    def _on_connection_closed(self, key, reason: str, detail: str | None) -> None:
+        reason_map = {
+            "remote_closed": (DisconnectReason.REMOTE_CLOSED, DisconnectInitiator.REMOTE),
+            "network_reset": (DisconnectReason.NETWORK_RESET, DisconnectInitiator.NETWORK),
+            "idle_timeout": (DisconnectReason.IDLE_TIMEOUT, DisconnectInitiator.SERVER),
+        }
+        normalized, initiator = reason_map.get(
+            reason,
+            (DisconnectReason.UNKNOWN, DisconnectInitiator.UNKNOWN),
+        )
+        self._close_connection(key, reason=normalized, initiator=initiator, detail=detail)
+
     async def stop(self) -> bool:
         """停止 Modbus 服务器"""
         try:
             if self._server:
+                self._close_all_connections()
                 await self._server.stopAsync()
                 self._is_running = False
                 return True
@@ -177,7 +213,7 @@ class ModbusServerHandler(ServerHandler):
                         from src.enums.modbus_register import Decode
 
                         point_end_addr = (
-                            point.address + Decode.get_decode_register_cnt(getattr(point, "decode", "0x41")) - 1
+                            point.address + Decode.get_decode_register_cnt(getattr(point, "decode", "INT32_ABCD")) - 1
                         )
 
                     # 判断地址是否有交集
@@ -253,7 +289,7 @@ class ModbusClientHandler(ClientHandler):
         self._config = config
         ip = config.get("ip", "127.0.0.1")
         port = config.get("port", Config.DEFAULT_PORT)
-        protocol_type = config.get("protocol_type", ProtocolType.ModbusTcp)
+        protocol_type = config.get("protocol_type", ProtocolType.ModbusTcpServer)
         runtime = config.get("runtime", {})
         security = config.get("security", {})
         self._command_timeout = runtime.get("command_timeout_ms", 2000) / 1000
@@ -276,7 +312,7 @@ class ModbusClientHandler(ClientHandler):
         parity = config.get("parity", "N")
 
         # 对于 TCP 客户端，使用专门的异步客户端以避免同一进程中的阻塞
-        if protocol_type == ProtocolType.ModbusTcpClient or protocol_type == ProtocolType.ModbusTcp:
+        if protocol_type == ProtocolType.ModbusTcpClient or protocol_type == ProtocolType.ModbusTcpServer:
             self._client = AsyncModbusClient(
                 host=ip,
                 port=port,
@@ -284,6 +320,7 @@ class ModbusClientHandler(ClientHandler):
                 retries=retries,
                 tls_enabled=bool(security.get("tls_enabled")),
                 tls_mode=str(security.get("tls_mode") or "one_way"),
+                tls_version=str(security.get("tls_version") or "1.2"),
                 certificate_path=security.get("certificate_path"),
                 private_key_path=security.get("private_key_path"),
                 ca_certificate_path=security.get("ca_certificate_path"),

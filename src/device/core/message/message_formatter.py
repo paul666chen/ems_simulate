@@ -17,6 +17,7 @@ from src.device.core.message.parsers import (
     describe_mms,
     parse_dlt645,
     parse_dnp3,
+    parse_iec101,
     parse_iec104,
     parse_mms,
     parse_modbus,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 
 # Modbus TCP 类协议类型集合
 _MODBUS_TCP_TYPES = {
-    ProtocolType.ModbusTcp,
+    ProtocolType.ModbusTcpServer,
     ProtocolType.ModbusTcpClient,
     ProtocolType.ModbusUdp,
 }
@@ -55,6 +56,11 @@ _DLT645_TYPES = {
 _IEC104_TYPES = {
     ProtocolType.Iec104Server,
     ProtocolType.Iec104Client,
+}
+
+_IEC101_TYPES = {
+    ProtocolType.Iec101Server,
+    ProtocolType.Iec101Client,
 }
 
 _MMS_TYPES = {
@@ -98,6 +104,13 @@ class MessageFormatter:
             if len(raw) < 12 or raw[0] != 0x68 or raw[2] & 0x01:
                 return None
             return int.from_bytes(raw[10:12], "little")
+        if protocol_type in _IEC101_TYPES:
+            if not raw:
+                return None
+            if raw[0] == 0x10 and len(raw) >= 5:
+                return raw[2]
+            if raw[0] == 0x68 and len(raw) >= 8:
+                return raw[5]
         return None
 
     @property
@@ -127,8 +140,10 @@ class MessageFormatter:
         is_client = self._device.protocol_type in [
             ProtocolType.ModbusTcpClient,
             ProtocolType.Iec104Client,
+            ProtocolType.Iec101Client,
             ProtocolType.Dlt645Client,
             ProtocolType.Iec61850Client,
+            ProtocolType.Dnp3Client,
         ]
 
         # 判断协议类型以选择解析方式
@@ -137,7 +152,9 @@ class MessageFormatter:
         is_tcp = protocol_type in _MODBUS_TCP_TYPES
         is_dlt645 = protocol_type in _DLT645_TYPES
         is_iec104 = protocol_type in _IEC104_TYPES
+        is_iec101 = protocol_type in _IEC101_TYPES
         is_mms = protocol_type in _MMS_TYPES
+        is_dnp3 = protocol_type in _DNP3_TYPES
 
         # 统一显示格式
         result = []
@@ -178,11 +195,26 @@ class MessageFormatter:
                 description = DLT645MessageParser.parse(raw_hex)
             elif is_iec104 and raw_hex:
                 description = IEC104MessageParser.parse(raw_hex)
+            elif is_iec101 and raw_hex:
+                try:
+                    description = parse_iec101(
+                        bytes.fromhex(raw_hex),
+                        role=msg_type,
+                        link_address_size=int(self._device.runtime_config.get("link_address_size", 1)),
+                    )["summary"]
+                except (TypeError, ValueError):
+                    description = "IEC101报文格式无效"
             elif is_mms and raw_hex:
                 try:
                     description = describe_mms(bytes.fromhex(raw_hex), role=msg_type)
                 except (TypeError, ValueError):
                     description = "MMS报文格式无效"
+            elif is_dnp3 and raw_hex:
+                try:
+                    parsed = parse_dnp3(bytes.fromhex(raw_hex), role=msg_type)
+                    description = parsed["summary"]
+                except (TypeError, ValueError):
+                    description = "DNP3报文格式无效"
 
             # 原始16进制数据和长度
             hex_data = msg.get("hex_string", msg.get("data", ""))
@@ -204,6 +236,10 @@ class MessageFormatter:
                     "length": length,
                     "protocol_type": protocol_type.value,
                     "slave_id": self._extract_slave_id(raw_hex, protocol_type),
+                    "fragment_correlation_id": msg.get("fragment_correlation_id"),
+                    "transport_sequence": msg.get("transport_sequence"),
+                    "transport_first": msg.get("transport_first"),
+                    "transport_final": msg.get("transport_final"),
                 }
             )
 
@@ -238,10 +274,17 @@ class MessageFormatter:
             detail = parse_dlt645(raw, role=role)
         elif protocol_type in _IEC104_TYPES:
             detail = parse_iec104(raw, role=role)
+        elif protocol_type in _IEC101_TYPES:
+            detail = parse_iec101(
+                raw,
+                role=role,
+                link_address_size=int(self._device.runtime_config.get("link_address_size", 1)),
+            )
         elif protocol_type in _MMS_TYPES:
             detail = parse_mms(raw, role=role)
         elif protocol_type in _DNP3_TYPES:
-            detail = parse_dnp3(raw, role=role)
+            request_context = self._find_dnp3_request_context(messages, message)
+            detail = parse_dnp3(raw, role=role, request_context=request_context)
         else:
             return None
         detail.update(
@@ -251,8 +294,64 @@ class MessageFormatter:
             timestamp=message.get("timestamp", 0),
             formatted_time=message.get("formatted_time", ""),
         )
+        fragment_id = message.get("fragment_correlation_id")
+        if fragment_id:
+            related = [item["sequence_id"] for item in messages if item.get("fragment_correlation_id") == fragment_id]
+            detail["fragment_correlation"] = {
+                "id": fragment_id,
+                "frame_sequence_ids": related,
+                "transport_sequence": message.get("transport_sequence"),
+                "first": message.get("transport_first"),
+                "final": message.get("transport_final"),
+            }
         self._enrich_with_points(detail, protocol_type)
         return detail
+
+    @staticmethod
+    def _find_dnp3_request_context(messages: list[dict], message: dict) -> dict | None:
+        """Correlate application responses by the four-bit application sequence."""
+        try:
+            current = parse_dnp3(bytes.fromhex(message.get("raw_hex", "")), role=message.get("msg_type", ""))
+        except (TypeError, ValueError):
+            return None
+        sequence = current.get("application_sequence")
+        function = current.get("application_function_code")
+        if sequence is None or function not in (129, 130):
+            return None
+        current_id = message.get("sequence_id", 0)
+        for candidate in reversed(messages):
+            if candidate.get("sequence_id", 0) >= current_id or candidate.get("msg_type") != "Request":
+                continue
+            try:
+                parsed = parse_dnp3(bytes.fromhex(candidate.get("raw_hex", "")), role="Request")
+            except (TypeError, ValueError):
+                continue
+            if parsed.get("application_sequence") != sequence:
+                continue
+            context = {
+                "application_sequence": sequence,
+                "request_sequence_id": candidate.get("sequence_id"),
+                "request_function_code": parsed.get("application_function_code"),
+                "request_function": parsed.get("application_function"),
+            }
+            if parsed.get("application_function_code") == 4:
+                operate_addresses = {item.get("address") for item in parsed.get("objects", [])}
+                for selected in reversed(messages):
+                    selected_id = selected.get("sequence_id", 0)
+                    if selected_id >= candidate.get("sequence_id", 0) or selected.get("msg_type") != "Request":
+                        continue
+                    try:
+                        select_detail = parse_dnp3(bytes.fromhex(selected.get("raw_hex", "")), role="Request")
+                    except (TypeError, ValueError):
+                        continue
+                    select_addresses = {item.get("address") for item in select_detail.get("objects", [])}
+                    if select_detail.get("application_function_code") == 3 and (
+                        not operate_addresses or operate_addresses == select_addresses
+                    ):
+                        context["select_sequence_id"] = selected_id
+                        break
+            return context
+        return None
 
     def _enrich_with_points(self, detail: dict, protocol_type: ProtocolType) -> None:
         """Attach configured point semantics without mixing point lookup into wire parsers."""
@@ -266,6 +365,10 @@ class MessageFormatter:
             self._enrich_address_objects(detail, points, dlt645=True)
         elif protocol_type in _IEC104_TYPES:
             self._enrich_address_objects(detail, points, dlt645=False)
+        elif protocol_type in _IEC101_TYPES:
+            self._enrich_address_objects(detail, points, dlt645=False)
+        elif protocol_type in _DNP3_TYPES:
+            self._enrich_dnp3_objects(detail, points)
 
     @staticmethod
     def _point_metadata(point) -> dict:
@@ -307,13 +410,10 @@ class MessageFormatter:
                 item.setdefault("warnings", []).append("响应寄存器不足，无法按测点解析码组合")
                 continue
             try:
-                buffer = b"".join(bytes.fromhex(str(register["raw_value"])) for register in registers)
-                expected_size = info.register_cnt * 2
-                if info.pack_format[-1:] in ("b", "B"):
-                    buffer = buffer[:1]
-                elif len(buffer) != expected_size:
-                    raise ValueError("register byte count mismatch")
-                decoded = Decode.unpack_value(info.pack_format, buffer)
+                raw_registers = [
+                    int.from_bytes(bytes.fromhex(str(register["raw_value"])), "big") for register in registers
+                ]
+                decoded = Decode.decode_registers(point.decode, raw_registers)
                 item["decoded_value"] = decoded
                 item["engineering_value"] = round(decoded * metadata["multiplier"] + metadata["addition"], 6)
                 item["combined_raw"] = _join_object_raw(registers)
@@ -336,6 +436,39 @@ class MessageFormatter:
                     candidate
                     for candidate in points
                     if candidate.address == address and (common_address is None or candidate.rtu_addr == common_address)
+                ),
+                None,
+            )
+            if point is None:
+                continue
+            metadata = self._point_metadata(point)
+            item["point"] = metadata
+            item["name"] = point.name or item.get("name", "")
+            value = item.get("value")
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                item["engineering_value"] = round(value * metadata["multiplier"] + metadata["addition"], 6)
+
+    def _enrich_dnp3_objects(self, detail: dict, points: list) -> None:
+        group_frame_types = {
+            30: 0,
+            32: 0,
+            1: 1,
+            2: 1,
+            10: 2,
+            12: 2,
+            40: 3,
+            41: 3,
+        }
+        for item in detail["objects"]:
+            address = item.get("address")
+            frame_type = group_frame_types.get(item.get("dnp3_group"))
+            if not isinstance(address, int) or frame_type is None:
+                continue
+            point = next(
+                (
+                    candidate
+                    for candidate in points
+                    if int(candidate.address) == address and candidate.frame_type == frame_type
                 ),
                 None,
             )

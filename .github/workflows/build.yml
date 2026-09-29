@@ -42,9 +42,6 @@ jobs:
   build:
     needs: version
     timeout-minutes: 120
-    env:
-      # c104's Windows CMake build cannot handle non-ASCII source paths.
-      UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
     strategy:
       fail-fast: false
       matrix:
@@ -87,6 +84,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Configure short uv cache path
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+
+          # c104's vendored native sources create deep object paths on Windows.
+          # RUNNER_TEMP is both ASCII-only and shorter than github.workspace.
+          cache_dir = Path(os.environ["RUNNER_TEMP"]) / "uv-cache"
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as env_file:
+              env_file.write(f"UV_CACHE_DIR={cache_dir}\n")
+
       - name: Install c104 build toolchain (Linux)
         if: runner.os == 'Linux'
         run: |
@@ -101,6 +110,11 @@ jobs:
           cache-dependency-glob: uv.lock
 
       - name: Install locked Python dependencies
+        env:
+          # c104's setup.py treats a truthy DEBUG value as a CMake Debug build.
+          # Never allow runner or cache environment state to enable DWARF data
+          # in release artifacts.
+          DEBUG: "0"
         run: uv sync --frozen --extra build --extra dev
 
       - name: Verify c104 2.2.2 TLS API

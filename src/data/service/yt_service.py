@@ -8,6 +8,7 @@ from src.enums.modbus_def import ProtocolType
 from src.enums.point_data import Yt
 from src.tools.transform import decimal_to_hex, process_hex_address, transform
 
+from .dnp3_point_config import apply_dnp3_point_config
 from .point_protocol_filter import reject_foreign_protocol_points
 
 
@@ -76,7 +77,7 @@ class YtService:
     def _create_point(cls, item: dict, protocol_type: ProtocolType) -> Yt | None:
         """创建遥调点对象"""
         if protocol_type in [
-            ProtocolType.ModbusTcp,
+            ProtocolType.ModbusTcpServer,
             ProtocolType.ModbusRtu,
             ProtocolType.ModbusRtuClient,
             ProtocolType.ModbusRtuServer,
@@ -96,10 +97,15 @@ class YtService:
                 add_coe=item["add_coe"],
                 mul_coe=item["mul_coe"],
                 frame_type=3,
-                decode=item["decode_code"] if item.get("decode_code") else "0x41",
+                decode=item["decode_code"] if item.get("decode_code") else "INT32_ABCD",
             )
 
-        elif protocol_type in [ProtocolType.Iec104Server, ProtocolType.Iec104Client]:
+        elif protocol_type in [
+            ProtocolType.Iec104Server,
+            ProtocolType.Iec104Client,
+            ProtocolType.Iec101Server,
+            ProtocolType.Iec101Client,
+        ]:
             address = decimal_to_hex(int(item["reg_addr"], 0))
             iec_type_id = item.get("iec_type_id")
             iec_quality = item.get("iec_quality", 0)
@@ -153,18 +159,22 @@ class YtService:
 
         elif protocol_type in [ProtocolType.Dnp3Server, ProtocolType.Dnp3Client]:
             # DNP3 以 index 寻址：reg_addr 存十进制 index
-            return Yt(
-                rtu_addr=item["rtu_addr"],
-                address=process_hex_address(item["reg_addr"]),
-                func_code=int(item["func_code"]) if item.get("func_code") else 6,
-                name=item["name"],
-                code=item["code"],
-                value=0,
-                max_value_limit=item["max_limit"],
-                min_value_limit=item["min_limit"],
-                add_coe=item["add_coe"],
-                mul_coe=item["mul_coe"],
-                frame_type=3,
+            return apply_dnp3_point_config(
+                Yt(
+                    rtu_addr=item["rtu_addr"],
+                    address=process_hex_address(item["reg_addr"]),
+                    func_code=int(item["func_code"]) if item.get("func_code") else 6,
+                    name=item["name"],
+                    code=item["code"],
+                    value=0,
+                    max_value_limit=item["max_limit"],
+                    min_value_limit=item["min_limit"],
+                    add_coe=item["add_coe"],
+                    mul_coe=item["mul_coe"],
+                    frame_type=3,
+                ),
+                item,
+                3,
             )
 
         return None

@@ -5,10 +5,11 @@ frame_type = 3
 
 from typing import TypedDict
 
-from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, validates
 
 from src.data.model.base import Base
+from src.enums.modbus_register import Decode
 
 
 class PointYtDict(TypedDict):
@@ -50,7 +51,12 @@ class PointYt(Base):
     rtu_addr: Mapped[int] = mapped_column(Integer, server_default="1", comment="从机地址/IEC104信息对象地址")
     reg_addr: Mapped[str] = mapped_column(String(128), nullable=False, comment="寄存器地址")
     func_code: Mapped[int] = mapped_column(Integer, server_default="3", comment="功能码")
-    decode_code: Mapped[str] = mapped_column(String(10), server_default="0x20", comment="解析码(Modbus专用)")
+    decode_code: Mapped[str] = mapped_column(
+        String(32),
+        default="UINT16_AB",
+        server_default="UINT16_AB",
+        comment="解析码(Modbus专用)",
+    )
 
     # 遥调特有字段（与遥测类似）
     mul_coe: Mapped[float] = mapped_column(Float, server_default="1.0", comment="乘系数")
@@ -78,6 +84,7 @@ class PointYt(Base):
     fc: Mapped[str | None] = mapped_column(
         String(8), nullable=True, comment="IEC61850功能约束(FC), 如MX/ST/CO/DC/CF/SF等"
     )
+    dnp3_config: Mapped[str | None] = mapped_column(Text, nullable=True, comment="DNP3点级配置(JSON)")
 
     enable: Mapped[bool] = mapped_column(Boolean, server_default="1", comment="是否启用")
 
@@ -85,6 +92,10 @@ class PointYt(Base):
         UniqueConstraint("code", "channel_id", "rtu_addr", name="uq_point_yt_code_channel_rtu"),
         {"comment": "遥调测点表"},
     )
+
+    @validates("decode_code")
+    def _normalize_decode_code(self, _key: str, value: str) -> str:
+        return Decode.normalize(value)
 
     @property
     def frame_type(self) -> int:

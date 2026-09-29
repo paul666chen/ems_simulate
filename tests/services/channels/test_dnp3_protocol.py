@@ -7,6 +7,9 @@
 - DNP3 报文解析器：解析 pydnp3_pure 生成的真实链路帧
 """
 
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from src.data.service.channel_service import ChannelService
@@ -73,16 +76,24 @@ def test_dnp3_server_command_callback():
 def test_dnp3_parser_real_frame():
     """用 pydnp3_pure 生成的真实 DNP3 链路帧验证解析器。"""
     from pydnp3_pure.link.frame import LinkFrame
+    from pydnp3_pure.transport.segmenter import Segmenter
 
-    frame = LinkFrame.create(destination=1, source=10, primary=True, function=3, user_data=b"\xc0\x01")
+    # LinkFrame 只封装链路层；先为 Read 应用片段添加传输控制字。
+    segment = Segmenter().segment(b"\xc0\x01")[0]
+    frame = LinkFrame.create(destination=1, source=10, primary=True, function=3, user_data=segment)
     raw = frame.serialize()
     result = parse_dnp3(raw)
     assert result["protocol"] == "DNP3"
-    assert result["valid"] is True  # CRC 校验通过
+    assert result["valid"] is True
+    assert result["complete"] is True
     # 头 CRC 与数据块 CRC 均通过
     validation = {v["name"]: v["passed"] for v in result["validation"]}
     assert validation.get("链路头CRC") is True
     assert validation.get("数据块CRC") is True
+    fields = {field["key"]: field for field in result["fields"]}
+    assert fields["transport_control"]["offset"] == 10
+    assert fields["app_control"]["offset"] == 11
+    assert fields["function_code"]["offset"] == 12
     # 应用层解析出 Read 请求（功能码 01）
     fc_field = next((f for f in result["fields"] if f["key"] == "function_code"), None)
     assert fc_field is not None and "Read" in str(fc_field["display_value"])
@@ -152,3 +163,47 @@ def test_dnp3_service_create_points(protocol_type):
     # 十进制 index 无歧义
     yc10 = YcService._create_point(_dnp3_item("10"), protocol_type)
     assert yc10 is not None and int(yc10.address) == 10
+
+
+@pytest.mark.asyncio
+async def test_dnp3_handler_batch_read_uses_one_integrity_refresh_for_all_points():
+    """DNP3 批量读取不能退化成每个测点各发一次完整性轮询。"""
+    from src.device.protocol.dnp3_handler import DNP3ClientHandler
+
+    client = SimpleNamespace(
+        read_points_active=AsyncMock(
+            return_value={
+                (3, 30): 12.5,
+                (7, 1): True,
+            }
+        )
+    )
+    handler = DNP3ClientHandler()
+    handler._client = client
+    analog = SimpleNamespace(code="AI-3", address=3, frame_type=0)
+    binary = SimpleNamespace(code="BI-7", address=7, frame_type=1)
+
+    values = await handler.read_points_batch_async([analog, binary])
+
+    client.read_points_active.assert_awaited_once_with([(3, 30), (7, 1)])
+    assert values == {"AI-3": 12.5, "BI-7": True}
+
+
+@pytest.mark.asyncio
+async def test_dnp3_client_batch_read_sends_one_addressed_request():
+    from src.proto.dnp3.dnp3_client import Dnp3Client
+
+    client = Dnp3Client()
+    client._request = AsyncMock(return_value=SimpleNamespace(header=SimpleNamespace(iin=None)))
+    client.read_point = Mock(side_effect=lambda index, group: f"{group}:{index}")
+
+    values = await client.read_points_active([(3, 30), (7, 1)])
+
+    client._request.assert_awaited_once()
+    function, objects = client._request.await_args.args
+    assert function.name == "READ"
+    assert [(obj.header.group, obj.header.start, obj.header.stop) for obj in objects] == [
+        (30, 3, 3),
+        (1, 7, 7),
+    ]
+    assert values == {(3, 30): "30:3", (7, 1): "1:7"}

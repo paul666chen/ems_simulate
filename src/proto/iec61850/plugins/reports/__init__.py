@@ -16,6 +16,7 @@ from src.proto.iec61850.core import Iec61850Connection
 from ...core.linked_list import get_list_from_linked_list
 from ...core.native_calls import call_gil_safe
 from ...defs.constants import HAS_IEC61850, AcsiClass
+from ...defs.error_codes import format_ied_error
 from ...defs.types import OptFields, RCBInfo, ReportDataEntry, TrgOps
 from ...log import log
 from ..base import Iec61850Plugin
@@ -123,6 +124,28 @@ class ReportsPlugin:
             self._rcb_detail_cache.clear()
 
     # ==================== RCB 发现 ====================
+
+    def reuse_discovered_rcbs(self, model, details: dict[str, RCBInfo]) -> list[dict[str, Any]]:
+        """复用本轮在线发现的完整 RCB 响应，仅补读首次失败的控制块。
+
+        保留使能、预留/占用信息及真实 DataSet 引用；显式刷新状态仍实时读取。
+        """
+        rcbs = []
+        self._rcb_detail_cache.clear()
+        self._rcb_type_map.clear()
+        for ld in model.lds:
+            for ln in ld.lns:
+                for rcb in ln.rcb_list:
+                    detail = details.get(rcb.ref)
+                    if detail is not None:
+                        item = self._rcb_info_to_dict(detail)
+                    else:
+                        item = self._get_rcb_info(rcb.ref, rcb.rcb_type, ld.name, ln.name)
+                    self._rcb_detail_cache[rcb.ref] = item
+                    self._rcb_type_map[rcb.ref] = rcb.rcb_type
+                    rcbs.append(item)
+        log.info(f"复用在线发现 RCB: count={len(rcbs)}, reused={sum(r['ref'] in details for r in rcbs)}")
+        return rcbs
 
     def discover_rcbs(self, ld: str = "", ln: str = "") -> list[dict[str, Any]]:
         """发现报告控制块 (BRCB 和 URCB)
@@ -257,9 +280,7 @@ class ReportsPlugin:
                 raw = result[0] if isinstance(result, (list, tuple)) else result
                 error = result[1] if isinstance(result, (list, tuple)) and len(result) > 1 else 0
                 if error != iec61850.IED_ERROR_OK or raw is None:
-                    error_text = str(error)
-                    with contextlib.suppress(Exception):
-                        error_text = f"{error}({iec61850.IedClientError_toString(error)})"
+                    error_text = format_ied_error(error)
                     log.warning(
                         f"缓存 RCB 目录预热失败: association={association}, "
                         f"ln={ln_ref}, type={rcb_type}, error={error_text}"
@@ -1134,7 +1155,7 @@ class ReportsPlugin:
                 error = 0
 
             if error != iec61850.IED_ERROR_OK:
-                log.debug(f"获取 LN 目录失败: {ld}, error={error}")
+                log.debug(f"获取 LN 目录失败: {ld}, error={format_ied_error(error)}")
                 return []
 
             if ln_raw:

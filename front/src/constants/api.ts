@@ -46,6 +46,10 @@ export const CHANNEL_API = {
 export const DEVICE_API = {
   LIST: "/api/devices/list",
   INFO: "/api/devices/info",
+  CONNECTION_SUMMARY: "/api/devices/connection-summary",
+  CURRENT_CONNECTIONS: "/api/devices/current-connections",
+  CONNECTION_HISTORY: "/api/devices/connection-history",
+  CONNECTION_DETAIL: "/api/devices/connection-detail",
   START_SIMULATION: "/api/devices/start-simulation",
   STOP_SIMULATION: "/api/devices/stop-simulation",
   SIMULATION_CONFIG: "/api/devices/simulation-config",
@@ -58,6 +62,8 @@ export const DEVICE_API = {
   START_AUTO_READ: "/api/devices/start-auto-read",
   STOP_AUTO_READ: "/api/devices/stop-auto-read",
   MANUAL_READ: "/api/devices/manual-read",
+  MANUAL_READ_STATUS: "/api/devices/manual-read-status",
+  STOP_MANUAL_READ: "/api/devices/stop-manual-read",
   MESSAGES: "/api/devices/messages",
   MESSAGE_DETAIL: "/api/devices/message-detail",
   CLEAR_MESSAGES: "/api/devices/clear-messages",
@@ -192,6 +198,23 @@ export const REPORT_API = {
   DETAIL: "/api/channels/iec61850/reports/detail",
   ACTIVE: "/api/channels/iec61850/reports/active",
   REFRESH: "/api/channels/iec61850/reports/refresh",
+} as const;
+
+// ===== IEC 61850 定值组相关 =====
+export const SETTING_GROUP_API = {
+  LIST: "/api/channels/iec61850/setting-groups/list",
+  DETAIL: "/api/channels/iec61850/setting-groups/detail",
+  SELECT_EDIT: "/api/channels/iec61850/setting-groups/select-edit",
+  WRITE: "/api/channels/iec61850/setting-groups/write",
+  CONFIRM: "/api/channels/iec61850/setting-groups/confirm",
+  ACTIVATE: "/api/channels/iec61850/setting-groups/activate",
+} as const;
+
+// ===== IEC 61850 日志相关 =====
+export const IEC61850_LOG_API = {
+  CONTROLS: "/api/channels/iec61850/logs/controls",
+  ENABLE: "/api/channels/iec61850/logs/enable",
+  QUERY: "/api/channels/iec61850/logs/query",
 } as const;
 
 // ===== SCL 文件管理相关 =====

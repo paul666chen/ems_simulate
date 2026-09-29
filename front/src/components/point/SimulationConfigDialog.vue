@@ -118,9 +118,25 @@
             <!-- 右侧已选测点 -->
             <section class="right-panel">
               <header class="right-title">
-                <span>{{
-                  t("simConfig.selectedCount", { count: selectedLeaves.length })
-                }}</span>
+                <div class="selected-title-tools">
+                  <span class="selected-count">{{
+                    t("simConfig.selectedCount", {
+                      count: selectedLeaves.length,
+                    })
+                  }}</span>
+                  <el-input
+                    v-model="selectedKeyword"
+                    clearable
+                    size="small"
+                    class="selected-search"
+                    :disabled="!selectedLeaves.length"
+                    :placeholder="t('simConfig.selectedSearchPlaceholder')"
+                  >
+                    <template #prefix>
+                      <el-icon><Search /></el-icon>
+                    </template>
+                  </el-input>
+                </div>
                 <el-button
                   v-if="selectedLeaves.length"
                   text
@@ -131,17 +147,26 @@
                 >
               </header>
               <div ref="selectedListRef" class="selected-list">
-                <template v-if="selectedLeaves.length">
+                <template v-if="filteredSelectedLeaves.length">
                   <div
                     v-for="leaf in pagedLeaves"
                     :key="leaf.point_code"
-                    class="selected-row"
+                    :class="[
+                      'selected-row',
+                      {
+                        'is-fixed-value': leaf.simulate_method === 'FixedValue',
+                        'is-no-simulation': leaf.simulate_method === 'None',
+                      },
+                    ]"
                   >
                     <span
                       class="s-name"
                       :title="`${leaf.label} (${leaf.point_code})`"
                       >{{ leaf.label }}</span
                     >
+                    <span class="s-field-label">{{
+                      t("simConfig.method")
+                    }}</span>
                     <el-select
                       v-model="leaf.simulate_method"
                       size="small"
@@ -154,14 +179,39 @@
                         :value="opt.value"
                       />
                     </el-select>
+                    <span
+                      v-if="
+                        leaf.simulate_method !== 'FixedValue' &&
+                        leaf.simulate_method !== 'None'
+                      "
+                      class="s-field-label"
+                      >{{ t("simConfig.step") }}</span
+                    >
                     <el-input-number
+                      v-if="
+                        leaf.simulate_method !== 'FixedValue' &&
+                        leaf.simulate_method !== 'None'
+                      "
                       v-model="leaf.step"
                       size="small"
-                      :min="1"
+                      :min="0.001"
                       :max="10000"
-                      controls-position="right"
+                      :step="0.1"
+                      :controls="false"
                       class="s-step"
-                      :disabled="leaf.simulate_method === 'None'"
+                    />
+                    <span
+                      v-if="leaf.simulate_method === 'FixedValue'"
+                      class="s-field-label"
+                      >{{ t("simConfig.fixedValue") }}</span
+                    >
+                    <el-input-number
+                      v-if="leaf.simulate_method === 'FixedValue'"
+                      v-model="leaf.fixed_value"
+                      size="small"
+                      :controls="false"
+                      class="s-fixed"
+                      :placeholder="t('simConfig.fixedValue')"
                     />
                     <el-button
                       text
@@ -185,12 +235,16 @@
                     :page-size="pageSize"
                     background
                     layout="total, sizes, prev, pager, next, jumper"
-                    :total="selectedLeaves.length"
+                    :total="filteredSelectedLeaves.length"
                   />
                 </template>
                 <el-empty
                   v-else
-                  :description="t('simConfig.noSelected')"
+                  :description="
+                    selectedLeaves.length
+                      ? t('simConfig.noSearchResults')
+                      : t('simConfig.noSelected')
+                  "
                   :image-size="48"
                 />
               </div>
@@ -211,7 +265,11 @@
                   <span class="auto-refresh-label">{{
                     t("simConfig.autoRefresh")
                   }}</span>
-                  <el-select v-model="pollInterval" :disabled="!autoRefresh">
+                  <el-select
+                    v-model="pollInterval"
+                    :disabled="!autoRefresh"
+                    class="refresh-interval-select"
+                  >
                     <el-option
                       v-for="opt in REFRESH_INTERVAL_OPTIONS"
                       :key="opt.value"
@@ -230,7 +288,13 @@
                   class="sim-toggle-btn"
                   :type="simRunning ? 'danger' : 'success'"
                   :loading="simToggling"
-                  :disabled="!selectedLeaves.length && !simRunning"
+                  :disabled="
+                    (!selectedLeaves.length && !simRunning) ||
+                    (!deviceRunning && !simRunning) ||
+                    loading ||
+                    saving ||
+                    !configLoaded
+                  "
                   @click="toggleSimulation"
                 >
                   <el-icon v-if="!simToggling" style="margin-right: 4px">
@@ -291,7 +355,20 @@
                 width="80"
                 align="center"
               >
-                <template #default="{ row }">{{ row.step }}</template>
+                <template #default="{ row }">{{
+                  row.simulate_method === "FixedValue" ? "—" : row.step
+                }}</template>
+              </el-table-column>
+              <el-table-column
+                :label="t('simConfig.colFixedValue')"
+                width="100"
+                align="center"
+              >
+                <template #default="{ row }">{{
+                  row.simulate_method === "FixedValue"
+                    ? formatValue(row.fixed_value)
+                    : "—"
+                }}</template>
               </el-table-column>
               <el-table-column
                 :label="t('simConfig.colValue')"
@@ -344,7 +421,12 @@
       <el-button @click="emit('update:modelValue', false)">
         {{ t("common.cancel") }}
       </el-button>
-      <el-button type="primary" :loading="saving" @click="handleSave">
+      <el-button
+        type="primary"
+        :loading="saving"
+        :disabled="loading || !configLoaded || simToggling"
+        @click="handleSave"
+      >
         {{ t("common.save") }}
       </el-button>
     </template>
@@ -377,33 +459,32 @@ import {
   startSimulation,
   stopSimulation,
   applySimulationConfig,
+  getSimulationConfig,
   type SimulationConfigItem,
 } from "@/api/deviceApi";
 import {
   getPointTree,
-  type DeviceNode,
   type GroupNode,
   type PointLeaf,
 } from "@/api/pointTreeApi";
 import { showErrorOnce } from "@/api/http";
 import { batchPointValues } from "@/api/pointApi";
 import { FRAME_TYPE_TAG_MAP } from "@/constants/table";
+import { notifySimulationConfigChanged } from "@/composables/useSimulationConfigSync";
 
 const { t } = useI18n();
 
 const props = defineProps<{
   modelValue: boolean;
   deviceName: string;
+  /** 设备通讯是否已开启；未开启时允许配置，但不允许从 Dialog 启动模拟 */
+  deviceRunning?: boolean;
   /** 设备模拟是否运行中（页签2“状态”列展示） */
   simulationRunning?: boolean;
-  /** 父组件暂存的已保存配置（打开时优先回显） */
-  savedConfig: SimulationConfigItem[] | null;
 }>();
 
 const emit = defineEmits<{
   (e: "update:modelValue", v: boolean): void;
-  /** 保存配置：由父组件持有，点"开始模拟"时应用 */
-  (e: "save", config: SimulationConfigItem[]): void;
   /** 模拟开始/停止状态变化（供父组件立即同步外部按钮） */
   (e: "simulation-changed", running: boolean): void;
 }>();
@@ -420,6 +501,7 @@ interface SimTreeLeaf {
   enabled: boolean;
   simulate_method: string;
   step: number;
+  fixed_value: number;
 }
 
 interface SimTreeGroup {
@@ -436,8 +518,10 @@ interface SimTreeGroup {
 // ===== 状态 =====
 
 const loading = ref(false);
+const configLoaded = ref(false);
 const saving = ref(false);
 const keyword = ref("");
+const selectedKeyword = ref("");
 const activeTab = ref("select");
 /** 树数据：shallowRef 避免对 ~2 万个测点做深层响应式代理（61850 同款优化） */
 const treeData = shallowRef<SimTreeGroup[]>([]);
@@ -511,6 +595,7 @@ function collectCurrentConfig(): SimulationConfigItem[] {
         enabled: true,
         simulate_method: leaf.simulate_method,
         step: leaf.step,
+        fixed_value: leaf.fixed_value,
       });
     }
   });
@@ -519,7 +604,8 @@ function collectCurrentConfig(): SimulationConfigItem[] {
 
 /** 开启/停止模拟：与主界面按钮一致（开始前应用当前配置） */
 async function toggleSimulation(): Promise<void> {
-  if (simToggling.value) return;
+  if (simToggling.value || saving.value || loading.value) return;
+  if (!simRunning.value && !configLoaded.value) return;
   simToggling.value = true;
   try {
     if (simRunning.value) {
@@ -527,8 +613,7 @@ async function toggleSimulation(): Promise<void> {
       simRunning.value = false;
       emit("simulation-changed", false);
     } else {
-      const config = collectCurrentConfig();
-      await applySimulationConfig(props.deviceName, config);
+      if (!(await saveCurrentConfig())) return;
       await startSimulation(props.deviceName);
       simRunning.value = true;
       emit("simulation-changed", true);
@@ -542,7 +627,8 @@ async function toggleSimulation(): Promise<void> {
 
 function startAutoRefresh(): void {
   stopAutoRefresh();
-  if (!autoRefresh.value || !selectedLeaves.value.length) return;
+  if (!props.modelValue || !autoRefresh.value || !selectedLeaves.value.length)
+    return;
   refreshTimer = setTimeout(async () => {
     try {
       await refreshValues();
@@ -561,7 +647,9 @@ function stopAutoRefresh(): void {
   }
 }
 
-watch([autoRefresh, pollInterval], () => startAutoRefresh());
+watch([autoRefresh, pollInterval, () => props.modelValue], () =>
+  startAutoRefresh(),
+);
 watch(
   () => selectedLeaves.value.length,
   () => {
@@ -573,10 +661,20 @@ watch(
 // ===== 右侧已选测点分页 =====
 const pageSize = ref(20);
 const currentPage = ref(1);
+/** 仅过滤右侧已加入测点，不影响左侧树及实际已选集合 */
+const filteredSelectedLeaves = computed<SimTreeLeaf[]>(() => {
+  const kw = selectedKeyword.value.trim().toLowerCase();
+  if (!kw) return selectedLeaves.value;
+  return selectedLeaves.value.filter(
+    (leaf) =>
+      leaf.label.toLowerCase().includes(kw) ||
+      leaf.point_code.toLowerCase().includes(kw),
+  );
+});
 /** 当前页已选测点 */
 const pagedLeaves = computed<SimTreeLeaf[]>(() => {
   const start = (currentPage.value - 1) * pageSize.value;
-  return selectedLeaves.value.slice(start, start + pageSize.value);
+  return filteredSelectedLeaves.value.slice(start, start + pageSize.value);
 });
 /** 每页条数切换：回到第一页 */
 function handlePageSizeChange(size: number): void {
@@ -585,23 +683,24 @@ function handlePageSizeChange(size: number): void {
 }
 /** 已选变化时校正页码（删除/移出后回退到有效页） */
 watch(
-  () => selectedLeaves.value.length,
+  () => filteredSelectedLeaves.value.length,
   () => {
     const maxPage = Math.max(
       1,
-      Math.ceil(selectedLeaves.value.length / pageSize.value),
+      Math.ceil(filteredSelectedLeaves.value.length / pageSize.value),
     );
     if (currentPage.value > maxPage) currentPage.value = maxPage;
   },
 );
-
-/** 已保存配置快照（保存后保持回显一致） */
-let savedSnapshot: SimulationConfigItem[] | null = null;
+watch(selectedKeyword, () => {
+  currentPage.value = 1;
+});
 
 const treeProps = { children: "children", label: "label", value: "id" };
 
 const simulateOptions = computed(() => [
   { value: "None", label: t("simConfig.methodNone") },
+  { value: "FixedValue", label: t("device.fixedValue") },
   { value: "Random", label: t("device.random") },
   { value: "AutoIncrement", label: t("device.autoIncrement") },
   { value: "AutoDecrement", label: t("device.autoDecrement") },
@@ -619,6 +718,7 @@ const FRAME_LABEL_KEY: Record<number, string> = {
 };
 const METHOD_LABEL_KEY: Record<string, string> = {
   None: "simConfig.methodNone",
+  FixedValue: "device.fixedValue",
   Random: "device.random",
   AutoIncrement: "device.autoIncrement",
   AutoDecrement: "device.autoDecrement",
@@ -658,53 +758,54 @@ const totalLeafCount = computed(() => countLeaves(treeData.value));
 async function handleOpen(): Promise<void> {
   activeTab.value = "select";
   keyword.value = "";
-  await loadTree();
-  await nextTick();
-  measureTree();
-  // 回显仅限用户保存过的配置（数量可控）。
-  // 不自动带入后端当前配置：默认状态为"全部测点参与模拟"（2 万点全选会
-  // 一次性渲染海量行导致卡死）；用户未配置时保持全不选，点"开始模拟"
-  // 仍走后端默认逻辑。
-  if (savedSnapshot?.length) {
-    mergeConfig(savedSnapshot);
-  } else {
-    moveAllOut();
+  selectedKeyword.value = "";
+  loading.value = true;
+  configLoaded.value = false;
+  moveAllOut();
+  try {
+    const [, configs] = await Promise.all([
+      loadTree(),
+      getSimulationConfig(props.deviceName),
+    ]);
+    mergeConfig(configs);
+    configLoaded.value = true;
+    await nextTick();
+    measureTree();
+  } catch (error) {
+    showErrorOnce(t("simConfig.loadTreeFailed"));
+    console.error("load simulation config failed:", error);
+  } finally {
+    loading.value = false;
   }
 }
 
 async function loadTree(): Promise<void> {
-  loading.value = true;
-  try {
-    // 后端已按设备名过滤；DLT645 设备的遥测分组由后端完成
-    const tree = await getPointTree(props.deviceName);
-    const deviceNode = tree.find((n) => n.label === props.deviceName);
-    treeData.value = [];
-    defaultExpandedKeys.value = [];
-    if (deviceNode) {
-      const groups: SimTreeGroup[] = [];
-      for (const typeNode of deviceNode.children ?? []) {
-        const group = buildTypeGroup(typeNode);
-        if (group.children.length) {
-          groups.push(group);
-        }
+  // 后端已按设备名过滤；DLT645 设备的遥测分组由后端完成
+  const tree = await getPointTree(props.deviceName);
+  const deviceNode = tree.find((n) => n.label === props.deviceName);
+  treeData.value = [];
+  indexTree([]);
+  defaultExpandedKeys.value = [];
+  if (deviceNode) {
+    const groups: SimTreeGroup[] = [];
+    for (const [index, typeNode] of (deviceNode.children ?? []).entries()) {
+      const group = buildTypeGroup(typeNode, index);
+      if (group.children.length) {
+        groups.push(group);
       }
-      treeData.value = groups;
-      indexTree(groups);
-      // 默认只展开"含子组的组"（叶子组折叠），避免 el-tree-v2 在 2 万
-      // 展开节点上每次展开/收起全量重建 flattenTree 导致卡顿
-      defaultExpandedKeys.value = collectExpandKeys(groups);
     }
-  } catch (error) {
-    showErrorOnce(t("simConfig.loadTreeFailed"));
-    console.error("load point tree failed:", error);
-  } finally {
-    loading.value = false;
+    treeData.value = groups;
+    indexTree(groups);
+    // 默认只展开"含子组的组"（叶子组折叠），避免 el-tree-v2 在 2 万
+    // 展开节点上每次展开/收起全量重建 flattenTree 导致卡顿
+    defaultExpandedKeys.value = collectExpandKeys(groups);
   }
 }
 
 // ===== 树构建（递归消费后端分组树） =====
 
 function createLeaf(leaf: PointLeaf, frame: number): SimTreeLeaf {
+  const currentValue = Number(leaf.value);
   return {
     id: leaf.code,
     label: leaf.name ?? leaf.code,
@@ -715,18 +816,24 @@ function createLeaf(leaf: PointLeaf, frame: number): SimTreeLeaf {
     enabled: true,
     simulate_method: "Random",
     step: 1,
+    fixed_value: Number.isFinite(currentValue) ? currentValue : 0,
   };
 }
 
-function buildTypeGroup(typeNode: {
-  label: string;
-  children: (GroupNode | PointLeaf)[];
-}): SimTreeGroup {
-  const frame = findFrameType(typeNode.children) ?? 0;
-  const children = buildNodes(typeNode.children, frame);
+function buildTypeGroup(
+  typeNode: {
+    label: string;
+    frame_type?: number | null;
+    children: (GroupNode | PointLeaf)[];
+  },
+  index: number,
+): SimTreeGroup {
+  const frame = typeNode.frame_type ?? findFrameType(typeNode.children) ?? 0;
+  const groupId = `root-${index}-${typeNode.label}`;
+  const children = buildNodes(typeNode.children, frame, groupId);
   return {
-    id: `type-${typeNode.label}`,
-    label: frameLabel(frame),
+    id: groupId,
+    label: typeNode.frame_type == null ? typeNode.label : frameLabel(frame),
     leafCount: countLeaves(children),
     leafCodes: collectLeafCodes(children),
     children,
@@ -737,22 +844,29 @@ function buildTypeGroup(typeNode: {
 function buildNodes(
   nodes: (GroupNode | PointLeaf)[],
   inheritedFrame: number,
+  parentId: string,
 ): (SimTreeGroup | SimTreeLeaf)[] {
   const result: (SimTreeGroup | SimTreeLeaf)[] = [];
-  for (const node of nodes) {
+  for (const [index, node] of nodes.entries()) {
     if ("type" in node) {
       result.push(createLeaf(node, TYPE_FRAME[node.type] ?? inheritedFrame));
     } else {
-      result.push(buildGroup(node));
+      result.push(buildGroup(node, inheritedFrame, parentId, index));
     }
   }
   return result;
 }
 
-function buildGroup(node: GroupNode): SimTreeGroup {
-  const children = buildNodes(node.children, 0);
+function buildGroup(
+  node: GroupNode,
+  inheritedFrame: number,
+  parentId: string,
+  index: number,
+): SimTreeGroup {
+  const groupId = `${parentId}-${index}-${node.label}`;
+  const children = buildNodes(node.children, inheritedFrame, groupId);
   return {
-    id: `group-${node.label}-${node.dlt645_prefix ?? ""}-${node.dlt645_settlement ?? ""}`,
+    id: groupId,
     label: resolveGroupLabel(node),
     leafCount: countLeaves(children),
     leafCodes: collectLeafCodes(children),
@@ -995,15 +1109,16 @@ function setGroupSelected(group: SimTreeGroup, selected: boolean): void {
 /** 按树顺序全量应用勾选集（用于配置回显/移入全部，仅一次 O(N)） */
 function selectCodesInOrder(codes: Set<string>): void {
   selectedCodes.clear();
-  selectedLeaves.value = [];
+  const leaves: SimTreeLeaf[] = [];
   for (const gid of Object.keys(groupSelCount)) groupSelCount[gid] = 0;
   walkLeaves(treeData.value, (leaf) => {
     if (codes.has(leaf.point_code)) {
       selectedCodes.add(leaf.point_code);
       leaf.enabled = true;
-      selectedLeaves.value.push(leaf);
+      leaves.push(leaf);
     }
   });
+  selectedLeaves.value = leaves;
   rebuildGroupCounts();
 }
 
@@ -1045,6 +1160,7 @@ function mergeConfig(configs: SimulationConfigItem[]): void {
     if (!leaf) continue;
     leaf.simulate_method = cfg.simulate_method ?? leaf.simulate_method;
     leaf.step = cfg.step ?? leaf.step;
+    leaf.fixed_value = cfg.fixed_value ?? leaf.fixed_value;
     leaf.enabled = cfg.enabled ?? true;
     if (leaf.enabled) enabledCodes.add(cfg.point_code);
   }
@@ -1074,19 +1190,31 @@ async function refreshValues(): Promise<void> {
 
 // ===== 保存 =====
 
+async function saveCurrentConfig(): Promise<boolean> {
+  const result = await applySimulationConfig(
+    props.deviceName,
+    collectCurrentConfig(),
+  );
+  // 批量接口可能部分成功，已展开的测点面板也需要读取实际生效的配置。
+  notifySimulationConfigChanged(props.deviceName);
+  if (result.failed.length) {
+    showErrorOnce(
+      `${t("pointSimulator.saveFailed")}: ${result.failed.map((item) => `${item.point_code}: ${item.reason}`).join("; ")}`,
+    );
+    return false;
+  }
+  return true;
+}
+
 async function handleSave(): Promise<void> {
+  if (saving.value || loading.value || !configLoaded.value || simToggling.value)
+    return;
   saving.value = true;
   try {
-    const config: SimulationConfigItem[] = selectedLeaves.value.map((leaf) => ({
-      point_code: leaf.point_code,
-      enabled: true,
-      simulate_method: leaf.simulate_method,
-      step: leaf.step,
-    }));
-    savedSnapshot = config;
-    emit("save", config);
-    // 保存成功后不关闭对话框，顶部轻提示
+    if (!(await saveCurrentConfig())) return;
     ElMessage.success(t("simConfig.saveSuccess"));
+  } catch (error) {
+    console.error("save simulation config failed:", error);
   } finally {
     saving.value = false;
   }
@@ -1279,6 +1407,20 @@ onBeforeUnmount(() => {
   font-size: 14px;
   color: var(--text-primary, #1f2937);
 }
+.selected-title-tools {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.selected-count {
+  flex: none;
+  white-space: nowrap;
+}
+.selected-search {
+  width: 240px;
+  font-weight: 400;
+}
 .right-title .el-button {
   font-weight: 400;
 }
@@ -1291,7 +1433,7 @@ onBeforeUnmount(() => {
 }
 .selected-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 128px 72px 24px;
+  grid-template-columns: minmax(0, 1fr) 64px 128px 40px 88px 24px;
   gap: 8px;
   align-items: center;
   margin-bottom: 8px;
@@ -1303,6 +1445,12 @@ onBeforeUnmount(() => {
   transition:
     border-color 0.16s ease,
     box-shadow 0.16s ease;
+}
+.selected-row.is-fixed-value {
+  grid-template-columns: minmax(0, 1fr) 64px 128px 40px 88px 24px;
+}
+.selected-row.is-no-simulation {
+  grid-template-columns: minmax(0, 1fr) 64px 128px 24px;
 }
 .selected-row:hover {
   border-color: #bfdbfe;
@@ -1323,7 +1471,16 @@ onBeforeUnmount(() => {
 .s-method {
   width: 100%;
 }
+.s-field-label {
+  color: var(--text-secondary, #606266);
+  font-size: 13px;
+  text-align: right;
+  white-space: nowrap;
+}
 .s-step {
+  width: 100%;
+}
+.s-fixed {
   width: 100%;
 }
 .s-del {
@@ -1366,6 +1523,10 @@ onBeforeUnmount(() => {
   font-size: 14px;
   color: var(--text-primary, #1f2937);
   white-space: nowrap;
+}
+.refresh-interval-select {
+  width: 70px;
+  min-width: 70px;
 }
 .data-table {
   flex: 1;

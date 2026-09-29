@@ -8,12 +8,19 @@ from fastapi import APIRouter, Request
 
 from src.config.storage import get_storage_path
 from src.data.dao.channel_dao import ChannelDao
+from src.data.dao.connection_session_dao import ConnectionSessionDao
+from src.device.auto_read import AutoReadConfig, AutoReadConflictError, AutoReadMode
+from src.device.core.connection import connection_registry
 from src.device.core.device import Device
+from src.device.protocol.base_handler import ServerHandler
 from src.enums.modbus_def import ProtocolType
-from src.web.api.exceptions import NotFoundError, OperationError, ValidationError
+from src.web.api.exceptions import ConflictError, NotFoundError, OperationError, ValidationError
 from src.web.api.schemas import (
     ApplySimulationConfigRequest,
+    AutoReadStartRequest,
     BaseResponse,
+    ConnectionDetailRequest,
+    ConnectionHistoryRequest,
     DeviceInfoRequest,
     DeviceStartRequest,
     DeviceStopRequest,
@@ -45,6 +52,11 @@ def _get_device(device_name: str, request: Request) -> Device:
     except KeyError as exc:
         log.warning(f"设备 {device_name} 不存在")
         raise NotFoundError(f"设备 {device_name} 不存在") from exc
+
+
+def _get_connection_handler(device: Device) -> ServerHandler | None:
+    handler = device.protocol_handler
+    return handler if isinstance(handler, ServerHandler) else None
 
 
 @device_router.post("/list", response_model=BaseResponse)
@@ -87,8 +99,110 @@ async def get_device_info(req: DeviceInfoRequest, request: Request):
         info_dict["conn_type"] = 2
 
     info_dict["server_status"] = device.is_protocol_running()
+    connection_handler = _get_connection_handler(device)
+    if connection_handler:
+        connection_summary = connection_handler.get_connection_summary()
+        info_dict["connection_monitoring_supported"] = connection_summary["supported"]
+        info_dict["current_connection_count"] = connection_summary["current_count"]
+    else:
+        info_dict["connection_monitoring_supported"] = False
+        info_dict["current_connection_count"] = 0
     info_dict["iec61850_model_loaded"] = device.iec61850_model_loaded
     return BaseResponse(message="获取设备信息成功!", data=info_dict)
+
+
+@device_router.post("/connection-summary", response_model=BaseResponse)
+async def get_connection_summary(req: DeviceInfoRequest, request: Request):
+    """获取服务运行状态与客户端连接摘要。"""
+    device = _get_device(req.device_name, request)
+    handler = _get_connection_handler(device)
+    if handler is None or not handler.supports_connection_monitoring():
+        return BaseResponse(
+            message="当前设备不支持客户端连接监控",
+            data={
+                "supported": False,
+                "unsupported_reason": "not_a_supported_network_server",
+                "server_running": device.is_protocol_running(),
+                "current_count": 0,
+                "active_count": 0,
+                "idle_count": 0,
+                "history_count": 0,
+                "abnormal_disconnects_today": 0,
+            },
+        )
+    summary = handler.get_connection_summary()
+    summary.update(await asyncio.to_thread(ConnectionSessionDao.summary_stats, device.device_id))
+    return BaseResponse(message="获取连接摘要成功", data=summary)
+
+
+@device_router.post("/current-connections", response_model=BaseResponse)
+async def get_current_connections(req: DeviceInfoRequest, request: Request):
+    """获取设备当前在线客户端连接。"""
+    device = _get_device(req.device_name, request)
+    handler = _get_connection_handler(device)
+    if handler is None or not handler.supports_connection_monitoring():
+        return BaseResponse(
+            message="当前设备不支持客户端连接监控",
+            data={"supported": False, "unsupported_reason": "not_a_supported_network_server", "items": []},
+        )
+    return BaseResponse(
+        message="获取当前连接成功",
+        data={"supported": True, "items": handler.get_current_connections()},
+    )
+
+
+@device_router.post("/connection-history", response_model=BaseResponse)
+async def get_connection_history(req: ConnectionHistoryRequest, request: Request):
+    """分页获取最近连接历史；每个设备最多保留 100 条。"""
+    device = _get_device(req.device_name, request)
+    handler = _get_connection_handler(device)
+    if handler is None or not handler.supports_connection_monitoring():
+        return BaseResponse(
+            message="当前设备不支持客户端连接监控",
+            data={
+                "supported": False,
+                "unsupported_reason": "not_a_supported_network_server",
+                "total": 0,
+                "retention_limit": 100,
+                "items": [],
+            },
+        )
+    reason = req.disconnect_reason.value if req.disconnect_reason else None
+    items, total = await asyncio.to_thread(
+        ConnectionSessionDao.list_history,
+        device.device_id,
+        page=req.page,
+        page_size=req.page_size,
+        disconnect_reason=reason,
+        remote_ip=req.remote_ip,
+    )
+    return BaseResponse(
+        message="获取连接历史成功",
+        data={
+            "supported": True,
+            "page": req.page,
+            "page_size": req.page_size,
+            "total": total,
+            "retention_limit": 100,
+            "items": items,
+        },
+    )
+
+
+@device_router.post("/connection-detail", response_model=BaseResponse)
+async def get_connection_detail(req: ConnectionDetailRequest, request: Request):
+    """按设备和会话 ID 获取当前或历史连接详情。"""
+    device = _get_device(req.device_name, request)
+    handler = _get_connection_handler(device)
+    if handler is None or not handler.supports_connection_monitoring():
+        raise ValidationError("当前设备不支持客户端连接监控")
+    current = connection_registry.get_current(device.device_id, req.session_id)
+    if current is not None:
+        return BaseResponse(message="获取连接详情成功", data=current.to_dict())
+    history = await asyncio.to_thread(ConnectionSessionDao.get_detail, device.device_id, req.session_id)
+    if history is None:
+        raise NotFoundError("连接记录不存在")
+    return BaseResponse(message="获取连接详情成功", data=history)
 
 
 @device_router.post("/slave-id-list", response_model=BaseResponse)
@@ -114,6 +228,8 @@ async def get_table_by_slave_id(req: DeviceTableRequest, request: Request):
         iec104_types=req.iec104_types,
         dlt645_prefix=req.dlt645_prefix,
         dlt645_settlement=req.dlt645_settlement,
+        dnp3_event_class=req.dnp3_event_class,
+        dnp3_event_enabled=req.dnp3_event_enabled,
     )
     data_dict = {"total": total, "table_data": table_data}
     return BaseResponse(message="获取从机信息成功!", data=data_dict)
@@ -319,40 +435,84 @@ async def discover_iec61850_model(req: DeviceInfoRequest, request: Request):
 async def get_auto_read_status(req: DeviceInfoRequest, request: Request):
     """获取自动读取状态"""
     device = _get_device(req.device_name, request)
-    is_running = device.is_auto_read_running()
-    return BaseResponse(message="获取自动读取状态成功!", data=is_running)
+    return BaseResponse(message="获取自动读取状态成功!", data=device.get_auto_read_status())
 
 
 @device_router.post("/start-auto-read", response_model=BaseResponse)
-async def start_auto_read(req: DeviceInfoRequest, request: Request):
+async def start_auto_read(req: AutoReadStartRequest, request: Request):
     """启动自动读取"""
     device = _get_device(req.device_name, request)
-    success = device.start_auto_read()
-    if not success:
-        log.warning(f"设备 {req.device_name} 自动读取已在运行中")
-        raise ValidationError("自动读取已在运行中!", data=False)
-    return BaseResponse(message="启动自动读取成功!", data=True)
+    if not device.is_protocol_running():
+        raise ValidationError("设备未连接，请先启动设备")
+    if req.mode == "dataset" and (req.channel_id is None or not req.item):
+        raise ValidationError("DataSet 自动读取必须指定 channel_id 和 item")
+    if any(point_type not in (0, 1, 2, 3) for point_type in req.point_types):
+        raise ValidationError("point_types 仅支持 0、1、2、3")
+    config = AutoReadConfig(
+        mode=AutoReadMode(req.mode),
+        cycle_interval_ms=req.cycle_interval_ms,
+        request_interval_ms=req.request_interval_ms,
+        slave_id=req.slave_id,
+        channel_id=req.channel_id,
+        category=req.category,
+        item=req.item,
+        point_types=tuple(req.point_types),
+        dlt645_prefix=req.dlt645_prefix,
+        dlt645_settlement=req.dlt645_settlement,
+    )
+    try:
+        status = await device.start_auto_read(config)
+    except AutoReadConflictError as exc:
+        raise ConflictError(str(exc), data=device.get_auto_read_status()) from exc
+    return BaseResponse(message="启动自动读取成功!", data=status)
 
 
 @device_router.post("/stop-auto-read", response_model=BaseResponse)
 async def stop_auto_read(req: DeviceInfoRequest, request: Request):
     """停止自动读取"""
     device = _get_device(req.device_name, request)
-    device.stop_auto_read()
-    return BaseResponse(message="停止自动读取成功!", data=True)
+    status = await device.stop_auto_read()
+    return BaseResponse(message="停止自动读取成功!", data=status)
 
 
 @device_router.post("/manual-read", response_model=BaseResponse)
 async def manual_read(req: ManualReadRequest, request: Request):
-    """手动读取"""
+    """提交一次后台批量、逐点或 DataSet 读取任务。"""
     device = _get_device(req.device_name, request)
+    if not device.is_protocol_running():
+        raise ValidationError("设备未连接，请先启动设备")
+    if req.mode == "dataset" and (req.channel_id is None or not req.item):
+        raise ValidationError("DataSet 读取必须指定 channel_id 和 item")
+    config = AutoReadConfig(
+        mode=AutoReadMode(req.mode),
+        cycle_interval_ms=100,
+        request_interval_ms=max(req.interval or 0, 0),
+        slave_id=req.slave_id,
+        channel_id=req.channel_id,
+        category=req.category,
+        item=req.item,
+        point_types=tuple(req.point_types),
+        dlt645_prefix=req.dlt645_prefix,
+        dlt645_settlement=req.dlt645_settlement,
+    )
+    try:
+        status = await device.start_manual_read(config)
+    except AutoReadConflictError as exc:
+        raise ConflictError(str(exc), data=device.get_manual_read_status()) from exc
+    return BaseResponse(message="后台读取任务已提交", data=status)
 
-    async def event_emitter(data):
-        # await manager.broadcast(data, req.device_name)  # TODO: ws 模块未实现
-        pass
 
-    stats = await device.single_read(event_emitter=event_emitter, interval_ms=req.interval)
-    return BaseResponse(message="手动读取成功!", data=stats)
+@device_router.post("/manual-read-status", response_model=BaseResponse)
+async def manual_read_status(req: DeviceInfoRequest, request: Request):
+    device = _get_device(req.device_name, request)
+    return BaseResponse(message="获取后台读取状态成功", data=device.get_manual_read_status())
+
+
+@device_router.post("/stop-manual-read", response_model=BaseResponse)
+async def stop_manual_read(req: DeviceInfoRequest, request: Request):
+    device = _get_device(req.device_name, request)
+    status = await device.stop_manual_read()
+    return BaseResponse(message="后台读取停止请求已提交", data=status)
 
 
 @device_router.post("/iec104-interrogation", response_model=BaseResponse)

@@ -36,7 +36,7 @@ def _read_result(point: BasePoint) -> float | str:
 _MODBUS_PROTOCOLS = frozenset(
     {
         ProtocolType.ModbusTcpClient,
-        ProtocolType.ModbusTcp,
+        ProtocolType.ModbusTcpServer,
         ProtocolType.ModbusRtu,
         ProtocolType.ModbusRtuClient,
         ProtocolType.ModbusRtuServer,
@@ -186,8 +186,10 @@ class PointOperator:
                     self._log.error(f"测点 {point_code} 写入失败: {e}")
                     raise ValueError(f"测点 {point_code} 写入失败: {e}") from e
                 if not result:
-                    self._log.error(f"测点 {point_code} 协议写入失败，请检查配置或物理连接")
-                    raise ValueError(f"测点 {point_code} 协议写入失败，请检查配置或物理连接")
+                    protocol_detail = getattr(self._handler, "last_error", None)
+                    detail = f": {protocol_detail}" if protocol_detail else "，请检查配置或物理连接"
+                    self._log.error(f"测点 {point_code} 协议写入失败{detail}")
+                    raise ValueError(f"测点 {point_code} 协议写入失败{detail}")
                 self._log.info(f"测点 {point_code} 写入成功: {real_value}")
                 return result
             else:
@@ -314,11 +316,13 @@ class PointOperator:
         if not self._handler:
             return {"quality": {}, "timestamp": {}}
 
-        from src.device.protocol.iec61850_handler import IEC61850ClientHandler
-
-        if not isinstance(self._handler, IEC61850ClientHandler):
+        if not hasattr(self._handler, "read_metadata_async"):
             self._log.debug(f"协议处理器不支持元数据读取: {point_code}")
             return {"quality": {}, "timestamp": {}}
+
+        point = self._pm.get_point_by_code(point_code, slave_id)
+        if point is not None:
+            return await self._handler.read_metadata_async(point)
 
         # point_code 可能是完整 DA 地址或 DO 引用，直接传给客户端
         from src.enums.points.base_point import BasePoint
@@ -407,6 +411,13 @@ class PointOperator:
                 need_resync = True  # 品质变更需要重新同步
                 protocol_config_changed = True
 
+        if "dnp3_config" in metadata:
+            from src.proto.dnp3.point_config import Dnp3PointConfig
+
+            point.dnp3_config = Dnp3PointConfig.from_mapping(point.frame_type, metadata["dnp3_config"]).to_dict()
+            metadata["dnp3_config"] = point.dnp3_config
+            protocol_config_changed = True
+
         # 处理 code 修改
         if "code" in metadata and metadata["code"] and metadata["code"] != point_code:
             new_code = metadata["code"]
@@ -419,7 +430,12 @@ class PointOperator:
         if need_resync and self._handler:
             # IEC104 协议下 iec_type_id 变更需要重新同步（影响编码方式）
             protocol_type = self._device.protocol_type
-            if protocol_type in [ProtocolType.Iec104Server, ProtocolType.Iec104Client]:
+            if protocol_type in [
+                ProtocolType.Iec104Server,
+                ProtocolType.Iec104Client,
+                ProtocolType.Iec101Server,
+                ProtocolType.Iec101Client,
+            ]:
                 try:
                     if isinstance(point, Yc):
                         # 遥测的协议值是原始值；系数修改只改变真实值。
@@ -530,13 +546,17 @@ class PointOperator:
             self._pm.add_point(slave_id, point)
 
             # 4. 添加到模拟控制器
-            self._device.simulation_controller.add_point(point, SimulateMethod.Random, 1)
-            self._device.simulation_controller.set_point_status(point, True)
+            self._device.simulation_controller.add_point(point, SimulateMethod.Random, 1, is_running=True)
 
             # 5. 添加到协议处理器
             if self._handler:
                 # IEC104 协议需要重新初始化
-                if protocol_type in [ProtocolType.Iec104Server, ProtocolType.Iec104Client]:
+                if protocol_type in [
+                    ProtocolType.Iec104Server,
+                    ProtocolType.Iec104Client,
+                    ProtocolType.Iec101Server,
+                    ProtocolType.Iec101Client,
+                ]:
                     self._device._reinit_protocol_for_iec104()
                 else:
                     self._handler.add_points([point])
@@ -596,14 +616,18 @@ class PointOperator:
                     self._pm.add_point(slave_id, point)
 
                 # 4. 添加到模拟控制器
-                self._device.simulation_controller.add_point(point, SimulateMethod.Random, 1)
-                self._device.simulation_controller.set_point_status(point, True)
+                self._device.simulation_controller.add_point(point, SimulateMethod.Random, 1, is_running=True)
 
                 memory_points.append(point)
 
             # 5. 添加到协议处理器
             if self._handler:
-                if protocol_type in [ProtocolType.Iec104Server, ProtocolType.Iec104Client]:
+                if protocol_type in [
+                    ProtocolType.Iec104Server,
+                    ProtocolType.Iec104Client,
+                    ProtocolType.Iec101Server,
+                    ProtocolType.Iec101Client,
+                ]:
                     self._device._reinit_protocol_for_iec104()
                 else:
                     self._handler.add_points(memory_points)
@@ -650,7 +674,12 @@ class PointOperator:
                 self._pm.remove_point_from_index(point_code, slave_id)
 
             # 3. IEC104 协议需要重新初始化（如果需要）
-            if self._device.protocol_type in [ProtocolType.Iec104Server, ProtocolType.Iec104Client]:
+            if self._device.protocol_type in [
+                ProtocolType.Iec104Server,
+                ProtocolType.Iec104Client,
+                ProtocolType.Iec101Server,
+                ProtocolType.Iec101Client,
+            ]:
                 self._device._reinit_protocol_for_iec104()
 
             self._log.info(f"动态删除测点成功: {point_code}")

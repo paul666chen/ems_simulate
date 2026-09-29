@@ -88,13 +88,12 @@
           <div class="raw-hint">{{ $t("device.messageClickToHighlight") }}</div>
         </section>
 
-        <section class="section">
+        <section class="section section-parse">
           <h3>{{ $t("device.messageFieldParse") }}</h3>
           <el-table
             :data="detail.fields"
             border
             size="small"
-            max-height="360"
             highlight-current-row
             :header-cell-style="{ whiteSpace: 'nowrap' }"
             @row-click="selectField"
@@ -127,10 +126,10 @@
           </el-table>
         </section>
 
-        <section v-if="detail.objects.length" class="section">
+        <section v-if="displayObjects.length" class="section">
           <h3>{{ $t("device.messageDataObjects") }}</h3>
           <el-table
-            :data="detail.objects"
+            :data="displayObjects"
             border
             size="small"
             max-height="280"
@@ -210,37 +209,45 @@
                 </div>
               </template>
             </el-table-column>
-            <el-table-column
-              prop="index"
-              :label="$t('device.messageIndexCol')"
-              width="55"
-            />
+            <el-table-column :label="$t('device.messageIndexCol')" width="55">
+              <template #default="{ $index }">{{ $index }}</template>
+            </el-table-column>
             <el-table-column :label="$t('device.messageBytesCol')" width="82">
               <template #default="{ row }">{{
-                byteRange(row.offset, row.length)
+                byteRange(row.offset, objectByteLength(row))
               }}</template>
             </el-table-column>
             <el-table-column
-              prop="name"
               :label="$t('device.messageDataItemCol')"
               min-width="120"
-            />
+            >
+              <template #default="{ row }">
+                {{ row.point?.name || "" }}
+              </template>
+            </el-table-column>
             <el-table-column
               prop="address"
               :label="$t('device.messageAddressIOA')"
               width="120"
             />
             <el-table-column
-              prop="raw_value"
               :label="$t('device.messageRawValue')"
               min-width="150"
-            />
+            >
+              <template #default="{ row }">
+                {{ row.combined_raw || row.raw_value }}
+              </template>
+            </el-table-column>
             <el-table-column
               :label="$t('device.messageParsedValue')"
               min-width="160"
             >
               <template #default="{ row }">{{
-                displayValue(row.value)
+                displayValue(
+                  row.decoded_value !== undefined
+                    ? row.decoded_value
+                    : row.value,
+                )
               }}</template>
             </el-table-column>
             <el-table-column
@@ -257,6 +264,34 @@
               min-width="150"
             />
           </el-table>
+        </section>
+
+        <section v-if="detail.fragment_correlation" class="section">
+          <h3>{{ $t("device.messageFragmentLink") }}</h3>
+          <el-descriptions :column="2" border>
+            <el-descriptions-item :label="$t('device.messageFragmentId')">
+              {{ detail.fragment_correlation.id }}
+            </el-descriptions-item>
+            <el-descriptions-item :label="$t('device.messageTransportSeq')">
+              {{ detail.fragment_correlation.transport_sequence }}
+            </el-descriptions-item>
+            <el-descriptions-item
+              :label="$t('device.messageRelatedFrames')"
+              :span="2"
+            >
+              <el-button
+                v-for="sequenceId in detail.fragment_correlation
+                  .frame_sequence_ids"
+                :key="sequenceId"
+                link
+                type="primary"
+                :disabled="sequenceId === detail.sequence_id"
+                @click="open(sequenceId)"
+              >
+                #{{ sequenceId }}
+              </el-button>
+            </el-descriptions-item>
+          </el-descriptions>
         </section>
 
         <section v-if="detail.correlation" class="section">
@@ -323,7 +358,11 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { showError } from "@/api/http";
 import { Rank } from "@element-plus/icons-vue";
-import { getMessageDetail, type MessageDetail } from "@/api/deviceApi";
+import {
+  getMessageDetail,
+  type MessageDetail,
+  type ParsedObject,
+} from "@/api/deviceApi";
 
 const { t } = useI18n();
 
@@ -334,6 +373,10 @@ const detail = ref<MessageDetail | null>(null);
 const selectedField = ref<{ offset: number; length: number } | null>(null);
 const rawBytes = computed(
   () => detail.value?.raw_hex.split(/\s+/).filter(Boolean) ?? [],
+);
+const displayObjects = computed(
+  () =>
+    detail.value?.objects.filter((object) => !object.covered_by_point) ?? [],
 );
 
 async function open(sequenceId: number) {
@@ -366,13 +409,16 @@ function selectField(field: { offset: number; length: number }) {
   selectedField.value = { offset: field.offset, length: field.length };
 }
 
-function selectObject(object: {
-  offset?: number;
-  length?: number;
-  fields?: Array<{ offset: number; length: number }>;
-}) {
-  if (typeof object.offset === "number" && object.length) {
-    selectField({ offset: object.offset, length: object.length });
+function objectByteLength(object: ParsedObject) {
+  const combinedLength =
+    object.combined_raw?.trim().split(/\s+/).filter(Boolean).length ?? 0;
+  return Math.max(object.length, combinedLength);
+}
+
+function selectObject(object: ParsedObject) {
+  const length = objectByteLength(object);
+  if (typeof object.offset === "number" && length) {
+    selectField({ offset: object.offset, length });
     return;
   }
   const mappedFields = object.fields?.filter((field) => field.length > 0) ?? [];
@@ -385,11 +431,7 @@ function selectObject(object: {
 }
 
 function handleObjectRowClick(
-  object: {
-    offset?: number;
-    length?: number;
-    fields?: Array<{ offset: number; length: number }>;
-  },
+  object: ParsedObject,
   _column: unknown,
   event: MouseEvent,
 ) {
@@ -416,6 +458,13 @@ defineExpose({ open });
 </script>
 
 <style scoped>
+/* 统一压缩报文详情抽屉的上下留白（所有协议共用本组件） */
+:global(.message-detail-drawer .el-drawer__header) {
+  margin-bottom: 12px;
+}
+:global(.message-detail-drawer .el-drawer__body) {
+  padding: 12px 16px 16px;
+}
 .drawer-title-content {
   display: flex;
   align-items: center;
@@ -439,10 +488,20 @@ defineExpose({ open });
   color: var(--el-color-primary);
 }
 .detail-body {
-  min-height: 180px;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
 }
 .section {
   margin-top: 18px;
+}
+/* 字段解析表格按实际行数自适应，不占满抽屉剩余高度。 */
+.section-parse {
+  flex: none;
+}
+.section-parse .el-table {
+  width: 100%;
+  border-bottom: var(--el-table-border);
 }
 .section h3 {
   margin: 0 0 10px;

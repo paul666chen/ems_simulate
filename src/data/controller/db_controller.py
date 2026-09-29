@@ -75,7 +75,10 @@ class DbController:
 
             # 创建所有表
             Base.metadata.create_all(self.db_config.engine)
+            self._migrate_decode_codes()
             self._migrate_channel_point_table_mode_schema()
+            self._migrate_channel_change_tracking_schema()
+            self._migrate_dnp3_point_config_schema()
             self._migrate_goose_schema()
             self._migrate_channel_security_schema()
 
@@ -154,10 +157,13 @@ class DbController:
         try:
             self.db_config = DbMysqlConfig()
             self.db_config.set_db_config(ip, port, user_name, pass_word)
-            self.db_config.create_engine(database, is_create_db=False)
+            self.db_config.create_engine(database)
             self._reset_legacy_iec61850_modeling_schema()
             Base.metadata.create_all(self.db_config.engine)
+            self._migrate_decode_codes()
             self._migrate_channel_point_table_mode_schema()
+            self._migrate_channel_change_tracking_schema()
+            self._migrate_dnp3_point_config_schema()
             self._migrate_goose_schema()
             self._migrate_channel_security_schema()
 
@@ -171,9 +177,55 @@ class DbController:
         """是否使用 SQLite"""
         return self._db_type == "sqlite"
 
+    def _migrate_decode_codes(self) -> None:
+        """Upgrade all point tables to descriptive decode codes, repeatedly safe."""
+        if not self.db_config:
+            return
+        from sqlalchemy import inspect, text
+
+        from src.enums.modbus_register import LEGACY_CODES
+
+        engine = self.db_config.engine
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        defaults = {"point_yc": "INT32_ABCD", "point_yt": "UINT16_AB", "point_yx": "UINT16_AB", "point_yk": "UINT16_AB"}
+        for table, default in defaults.items():
+            if table not in tables:
+                continue
+            columns = {column["name"]: column for column in inspector.get_columns(table)}
+            if "decode_code" not in columns:
+                continue
+            with engine.begin() as conn:
+                if self.is_mysql() and getattr(columns["decode_code"]["type"], "length", 0) < 32:
+                    conn.execute(
+                        text(f"ALTER TABLE {table} MODIFY COLUMN decode_code VARCHAR(32) NOT NULL DEFAULT '{default}'")
+                    )
+                # SQLite does not enforce the declared VARCHAR length. Existing
+                # VARCHAR(10) columns can store the new names without a table rebuild.
+                for old, new in LEGACY_CODES.items():
+                    conn.execute(
+                        text(f"UPDATE {table} SET decode_code = :new WHERE decode_code = :old"),
+                        {"new": new, "old": old},
+                    )
+
     def is_mysql(self) -> bool:
         """是否使用 MySQL"""
         return self._db_type == "mysql"
+
+    def _migrate_channel_change_tracking_schema(self) -> None:
+        """Persist the device-wide history setting, defaulting existing channels to off."""
+        if not self.db_config:
+            return
+        from sqlalchemy import inspect, text
+
+        engine = self.db_config.engine
+        inspector = inspect(engine)
+        if "channel" not in inspector.get_table_names():
+            return
+        columns = {column["name"] for column in inspector.get_columns("channel")}
+        if "change_tracking_enabled" not in columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE channel ADD COLUMN change_tracking_enabled BOOLEAN NOT NULL DEFAULT 0"))
 
     def _migrate_channel_point_table_mode_schema(self) -> None:
         """Add the persisted DLT645 point-table source to existing databases.
@@ -198,6 +250,23 @@ class DbController:
                     text("ALTER TABLE channel ADD COLUMN dlt645_point_mode VARCHAR(16) NOT NULL DEFAULT 'import'")
                 )
             self._backfill_legacy_dlt645_standard_tables()
+
+    def _migrate_dnp3_point_config_schema(self) -> None:
+        """Add one extensible JSON field to every legacy point table."""
+        if not self.db_config:
+            return
+        from sqlalchemy import inspect, text
+
+        engine = self.db_config.engine
+        inspector = inspect(engine)
+        tables = set(inspector.get_table_names())
+        for table in ("point_yc", "point_yx", "point_yk", "point_yt"):
+            if table not in tables:
+                continue
+            columns = {column["name"] for column in inspector.get_columns(table)}
+            if "dnp3_config" not in columns:
+                with engine.begin() as conn:
+                    conn.execute(text(f"ALTER TABLE {table} ADD COLUMN dnp3_config TEXT"))
 
     def _backfill_legacy_dlt645_standard_tables(self) -> None:
         """Recognize legacy standard tables by their complete DI code set."""
@@ -331,6 +400,7 @@ class DbController:
         existing = {column["name"] for column in inspector.get_columns("channel_security_config")}
         definitions = {
             "tls_mode": "VARCHAR(16) NOT NULL DEFAULT 'one_way'",
+            "tls_version": "VARCHAR(16) NOT NULL DEFAULT '1.2'",
             "ca_certificate_path": "VARCHAR(512)",
             "ca_certificate_filename": "VARCHAR(255)",
         }

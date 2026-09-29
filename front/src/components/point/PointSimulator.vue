@@ -33,9 +33,12 @@
             label-position="right"
             class="form-item"
           >
-            <el-input
+            <el-input-number
               v-model.number="simulateForm.step"
-              type="number"
+              :disabled="simulateForm.simulateMethod === 'FixedValue'"
+              :min="0.001"
+              :step="0.1"
+              :controls="false"
               :placeholder="$t('pointSimulator.enterStep')"
               style="width: 90%"
             />
@@ -80,6 +83,13 @@
             class="form-item"
           >
             <div class="special-params" v-if="showSpecialParams">
+              <el-input
+                v-if="simulateForm.simulateMethod === 'FixedValue'"
+                v-model.number="simulateForm.fixedValue"
+                type="number"
+                :placeholder="$t('pointSimulator.enterFixedValue')"
+                style="width: 90%"
+              />
               <el-input
                 v-if="simulateForm.simulateMethod === 'SineWave'"
                 v-model.number="simulateForm.period"
@@ -126,7 +136,7 @@
           }}</el-button>
         </el-form-item>
         <el-form-item class="custom-form-item">
-          <el-button @click="loadPointInfo">{{
+          <el-button @click="loadPointInfo()">{{
             $t("pointSimulator.loadPointInfo")
           }}</el-button>
         </el-form-item>
@@ -145,6 +155,7 @@ import { ref, reactive, watch, computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { ElMessage } from "element-plus";
 import { showErrorOnce } from "@/api/http";
+import { simulationConfigChange } from "@/composables/useSimulationConfigSync";
 import {
   getPointInfo,
   setSinglePointSimulateMethod,
@@ -166,6 +177,8 @@ const emit = defineEmits(["update-success"]);
 const { t } = useI18n();
 
 const simulateOptions = computed(() => [
+  { value: "None", label: t("simConfig.methodNone") },
+  { value: "FixedValue", label: t("device.fixedValue") },
   { value: "Random", label: t("device.random") },
   { value: "AutoIncrement", label: t("device.autoIncrement") },
   { value: "AutoDecrement", label: t("device.autoDecrement") },
@@ -177,6 +190,7 @@ const simulateOptions = computed(() => [
 const simulateForm = reactive({
   simulateMethod: "Random",
   step: 1,
+  fixedValue: 0,
   minValue: 0,
   maxValue: 100,
   period: 10, // 正弦波周期(秒)
@@ -192,7 +206,12 @@ const showSpecialParams = ref(false);
 watch(
   () => simulateForm.simulateMethod,
   (newMethod) => {
-    showSpecialParams.value = ["SineWave", "Ramp", "Pulse"].includes(newMethod);
+    showSpecialParams.value = [
+      "FixedValue",
+      "SineWave",
+      "Ramp",
+      "Pulse",
+    ].includes(newMethod);
   },
 );
 
@@ -215,7 +234,7 @@ watch([() => props.deviceName, () => props.pointCode], () => {
 });
 
 // 加载点信息
-const loadPointInfo = async () => {
+async function loadPointInfo(silent = false) {
   try {
     const info = await getPointInfo(props.deviceName, props.pointCode);
     if (info) {
@@ -223,6 +242,7 @@ const loadPointInfo = async () => {
       simulateForm.minValue = info.min_value || 0;
       simulateForm.maxValue = info.max_value || 100;
       simulateForm.simulateMethod = info.simulate_method || "Random";
+      simulateForm.fixedValue = info.fixed_value ?? info.value ?? 0;
       // 加载特殊参数
       if (info.period) simulateForm.period = info.period;
       if (info.phase) simulateForm.phase = info.phase;
@@ -230,13 +250,19 @@ const loadPointInfo = async () => {
       if (info.pulse_width) simulateForm.pulseWidth = info.pulse_width;
       if (info.pulse_interval) simulateForm.pulseInterval = info.pulse_interval;
 
-      ElMessage.success(t("pointSimulator.loaded"));
+      if (!silent) ElMessage.success(t("pointSimulator.loaded"));
     }
   } catch (error) {
     console.error("加载点信息失败:", error);
     // error message is handled by global interceptor
   }
-};
+}
+
+watch(simulationConfigChange, (change) => {
+  if (props.active && change?.deviceName === props.deviceName) {
+    void loadPointInfo(true);
+  }
+});
 
 // 保存设置
 const saveSettings = async () => {
@@ -252,6 +278,9 @@ const saveSettings = async () => {
       props.deviceName,
       props.pointCode,
       simulateForm.simulateMethod,
+      simulateForm.simulateMethod === "FixedValue"
+        ? simulateForm.fixedValue
+        : undefined,
     );
 
     // 保存步长
@@ -285,6 +314,7 @@ const saveSettings = async () => {
 const resetSettings = () => {
   simulateForm.simulateMethod = "Random";
   simulateForm.step = 1;
+  simulateForm.fixedValue = 0;
   simulateForm.minValue = 0;
   simulateForm.maxValue = 100;
   simulateForm.period = 10;

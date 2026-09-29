@@ -9,6 +9,7 @@ $TAURI_DIR = Join-Path $PROJECT_ROOT "src-tauri"
 $BUILD_DIR = Join-Path $PROJECT_ROOT "build"
 $BINARIES_DIR = Join-Path $TAURI_DIR "binaries"
 $PYTHON_EXE = Join-Path $PROJECT_ROOT ".venv\Scripts\python.exe"
+$NATIVE_OPTIMIZER = Join-Path $SCRIPT_DIR "optimize_windows_native_extensions.ps1"
 
 function WriteStep($m) { Write-Host "[STEP] $m" -ForegroundColor Cyan }
 function WriteOk($m)   { Write-Host "[SUCCESS] $m" -ForegroundColor Green }
@@ -68,7 +69,7 @@ if (-not (Test-Path -PathType Leaf $PYTHON_EXE)) {
 
 & $PYTHON_EXE -c "import PyInstaller" 2>$null
 if ($LASTEXITCODE -ne 0) {
-    WriteErr 'PyInstaller is not installed in .venv. Run: .\.venv\Scripts\python.exe -m pip install -e ".[build]"'
+    WriteErr 'PyInstaller is not installed in .venv. Run once: uv sync --extra build'
 }
 
 # Sync version to tauri.conf.json and package.json
@@ -95,8 +96,9 @@ if (-not $nv) { WriteErr "Node.js not found" }
 WriteOk "Rust: $rv"
 WriteOk "Node.js: $nv"
 
-# Generate icons (skip if all icons already exist and are newer than source)
-$iconSource = Join-Path $PROJECT_ROOT "resources\icon.png"
+# Generate icons (skip if all icons already exist and are newer than source/script)
+$iconSource = Join-Path $PROJECT_ROOT "resources\m.ico"
+$tauriIconScript = Join-Path $SCRIPT_DIR "generate_tauri_icons.py"
 $tauriIcons = @(
     (Join-Path $TAURI_DIR "icons\32x32.png"),
     (Join-Path $TAURI_DIR "icons\128x128.png"),
@@ -106,14 +108,14 @@ $tauriIcons = @(
 )
 $iconsUpToDate = $true
 foreach ($ic in $tauriIcons) {
-    if (-not (IsUpToDate $ic @($iconSource))) { $iconsUpToDate = $false; break }
+    if (-not (IsUpToDate $ic @($iconSource, $tauriIconScript))) { $iconsUpToDate = $false; break }
 }
 
 if ($iconsUpToDate) {
     WriteSkip "Tauri icons are up-to-date"
 } else {
     WriteStep "Generating Tauri icons..."
-    & $PYTHON_EXE scripts/generate_tauri_icons.py
+    & $PYTHON_EXE $tauriIconScript
     if ($LASTEXITCODE -ne 0) { WriteErr "Icon generation failed" }
     WriteOk "Tauri icons generated"
 }
@@ -156,7 +158,8 @@ if (-not $SkipBackend) {
         (Join-Path $PROJECT_ROOT "uv.lock"),
         (Join-Path $PROJECT_ROOT "ems_simulate_backend.spec"),
         (Join-Path $SCRIPT_DIR "rthook_numpy_compat.py"),
-        (Join-Path $SCRIPT_DIR "build_tauri_windows.ps1")
+        (Join-Path $SCRIPT_DIR "build_tauri_windows.ps1"),
+        $NATIVE_OPTIMIZER
     )
     if ((Test-Path $BE_RUNTIME_DIR) -and (IsUpToDate $BE_SIDECAR_EXE $beSources)) {
         WriteSkip "Python backend (sidecar) is up-to-date"
@@ -175,6 +178,7 @@ if (-not $SkipBackend) {
         $env:EMS_PYINSTALLER_MODE = "onedir"
         $env:EMS_PYINSTALLER_NAME = "ems_simulate_backend"
         $env:EMS_PYINSTALLER_CONTENTS_DIR = "ems_simulate_backend_runtime"
+        $env:EMS_PYINSTALLER_BUNDLE_CONFIG = "1"
         $env:EMS_PYINSTALLER_DATA_SCOPE = "point_csv"
         $env:EMS_PYINSTALLER_CONSOLE = "1"
         $pyArgs = @(
@@ -229,6 +233,21 @@ if (-not $SkipBackend) {
 } else {
     WriteSkip "Python backend build (skipped by flag)"
 }
+
+# Git-based native dependencies are compiled on the build machine. A polluted
+# MinGW/DEBUG environment or a cached wheel can therefore contain tens of MiB
+# of DWARF data. Strip only anomalously large c104 builds, then enforce a hard
+# size gate before Tauri copies the runtime into the installer.
+WriteStep "Optimizing Windows native extensions..."
+if (-not (Test-Path -LiteralPath $NATIVE_OPTIMIZER -PathType Leaf)) {
+    WriteErr "Native extension optimizer not found: $NATIVE_OPTIMIZER"
+}
+try {
+    & $NATIVE_OPTIMIZER -RuntimeDir $BE_RUNTIME_DIR
+} catch {
+    WriteErr "Native extension optimization failed: $($_.Exception.Message)"
+}
+WriteOk "Windows native extensions optimized and verified"
 
 # Build Tauri
 # Keep only the target-triple sidecar and its onedir runtime.
@@ -291,12 +310,13 @@ if ($Msix) {
     # Generate MSIX assets (skip if already generated and source icon hasn't changed)
     $assetsDir = Join-Path $PROJECT_ROOT "Assets"
     $msixAssetScript = Join-Path $SCRIPT_DIR "generate_msix_assets.py"
+    $msixIconSource = Join-Path $TAURI_DIR "icons\icon.png"
     $storeLogo = Join-Path $assetsDir "StoreLogo.png"
-    if ((Test-Path $storeLogo) -and (IsUpToDate $storeLogo @($iconSource))) {
+    if ((Test-Path $storeLogo) -and (IsUpToDate $storeLogo @($msixIconSource, $msixAssetScript))) {
         WriteSkip "MSIX icon assets are up-to-date"
     } else {
         WriteStep "Generating MSIX icon assets..."
-        & $PYTHON_EXE $msixAssetScript
+        & $PYTHON_EXE $msixAssetScript --source $msixIconSource
         if ($LASTEXITCODE -ne 0) { WriteErr "MSIX asset generation failed" }
         WriteOk "MSIX icon assets generated"
     }

@@ -6,6 +6,10 @@ EMS Simulate 支持通过配置文件和环境变量进行灵活配置。
 
 主配置文件位于项目根目录的 `config.ini`：
 
+Web 打包版本（Windows、Linux x86_64 和 ARM64）读取可执行文件同级的 `config.ini`，
+`_internal` 中不包含该配置文件。修改配置后重启服务即可生效。
+显式指定 `EMS_ROOT_DIR` 或 `--root-dir` 时，读取该运行目录中的配置，环境变量优先。
+
 ```ini
 [server]
 port = 8991
@@ -41,6 +45,9 @@ username = your_user
 password = your_password
 database = ems_simulate
 ```
+
+启动时会自动创建尚不存在的 MySQL 数据库（使用 `utf8mb4` 字符集），随后初始化表结构。
+首次建库需要配置的账号拥有对应数据库的 `CREATE` 权限；数据库已存在时直接使用，保留已有数据。
 
 ## 日志配置
 

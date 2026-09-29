@@ -17,6 +17,8 @@ export enum ProtocolType {
   Iec104 = 2,
   Dlt645 = 3,
   Iec61850 = 4,
+  Dnp3 = 5,
+  Iec101 = 6,
 }
 
 // 协议选项
@@ -59,6 +61,7 @@ export interface ChannelCreateRequest {
   group_id?: number | null;
   protocol_params?: ProtocolParamsConfig;
   dlt645_point_mode?: "standard" | "import";
+  change_tracking_enabled?: boolean;
 }
 
 export interface ProtocolParamsConfig {
@@ -66,9 +69,12 @@ export interface ProtocolParamsConfig {
   values: Record<string, number | boolean | string>;
 }
 
+export type TlsVersion = "1.2" | "1.3";
+
 export interface SecurityConfig {
   tls_enabled: boolean;
   tls_mode: "one_way" | "mutual";
+  tls_version?: TlsVersion;
   certificate_configured: boolean;
   certificate_filename?: string | null;
   private_key_configured: boolean;
@@ -101,6 +107,7 @@ export interface ChannelInfo {
   protocol_params?: ProtocolParamsConfig;
   security_config?: SecurityConfig;
   dlt645_point_mode?: "standard" | "import";
+  change_tracking_enabled?: boolean;
 }
 
 // 点表导入结果

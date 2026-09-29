@@ -7,6 +7,7 @@ from typing import Any
 from src.config.config import Config
 from src.data.service.channel_configuration_service import ChannelConfigurationService
 from src.data.service.channel_service import ChannelService
+from src.data.service.point_mapping_service import PointMappingService
 from src.device.factory.general_device_builder import GeneralDeviceBuilder
 from src.device.types.circuit_breaker import CircuitBreaker
 from src.device.types.general_device import GeneralDevice
@@ -39,6 +40,7 @@ def configure_builder_network(builder, conn_type, protocol_type, ip, port, chann
         )
     elif protocol_type in [
         ProtocolType.Iec104Client,
+        ProtocolType.Iec101Client,
         ProtocolType.ModbusTcpClient,
         ProtocolType.Dlt645Client,
         ProtocolType.Iec61850Client,
@@ -75,6 +77,7 @@ def is_client_protocol(protocol_type) -> bool:
     return protocol_type in [
         ProtocolType.ModbusTcpClient,
         ProtocolType.Iec104Client,
+        ProtocolType.Iec101Client,
         ProtocolType.Dlt645Client,
         ProtocolType.Iec61850Client,
         ProtocolType.Dnp3Client,
@@ -90,6 +93,18 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
         is_start: 是否启动设备
         scl_result: 可选，预先解析的 SclImportResult。提供时跳过 ICD 文件重新解析。
     """
+    get_device_by_id = getattr(device_controller, "get_device_by_id", None)
+    old_device = get_device_by_id(channel_id) if callable(get_device_by_id) else None
+    old_auto_read_status = old_device.get_auto_read_status() if old_device is not None else {}
+    previous_auto_read_config = (
+        old_device.auto_read_manager.current_config()
+        if old_device is not None and old_auto_read_status.get("state") == "running"
+        else None
+    )
+    previous_simulation_config = (
+        old_device.simulation_controller.snapshot_configuration() if old_device is not None else None
+    )
+    was_simulating = old_device.isSimulationRunning() if old_device is not None else False
     channel = await asyncio.to_thread(ChannelService.get_channel_by_id, channel_id)
     if not channel:
         raise NotFoundError(f"通道 {channel_id} 不存在")
@@ -140,11 +155,20 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
 
     new_device = await asyncio.to_thread(build_device)
 
+    same_protocol = old_device is not None and old_device.protocol_type == channel_protocol_type
+    if same_protocol and previous_simulation_config is not None:
+        await asyncio.to_thread(
+            new_device.simulation_controller.restore_configuration,
+            previous_simulation_config,
+            defer_missing=channel_protocol_type in (ProtocolType.Iec61850Server, ProtocolType.Iec61850Client),
+        )
+
     # 需要在新实例启动前停止旧实例（释放端口/连接）的场景
     needs_stop_before_start = is_start and (
         is_client_protocol(channel_protocol_type)
         or channel_protocol_type == ProtocolType.Iec61850Server
         or channel_protocol_type == ProtocolType.Dnp3Server
+        or channel_protocol_type == ProtocolType.Iec101Server
     )
     if needs_stop_before_start:
         await device_controller.remove_device_by_id(channel_id)
@@ -156,7 +180,6 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
         else:
             # Modbus/其他客户端：先连接服务器，再启动数据更新线程
             await new_device.start()
-        new_device.data_update_thread.start()
     elif is_start and channel_protocol_type == ProtocolType.Iec61850Server:
         # IEC61850 服务端: 需要显式启动 MMS 服务器
         # 注意: IEC61850 服务器不在 is_client_protocol 中，
@@ -167,6 +190,9 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
         # DNP3 服务端（Outstation）: 不在 is_client_protocol 中，需显式启动监听
         await new_device.start()
         log.info(f"DNP3 服务端已启动: {device_name}")
+    elif is_start and channel_protocol_type == ProtocolType.Iec101Server:
+        await new_device.start()
+        log.info(f"IEC101 从站已启动: {device_name}")
 
     if not needs_stop_before_start:
         # 非启动场景（或无需先停的启动场景）：新实例已构建完成，
@@ -175,6 +201,18 @@ async def reload_device_instance(device_controller, channel_id: int, is_start: b
 
     device_controller.device_list.append(new_device)
     device_controller.device_map[new_device.name] = new_device
+
+    # 重建设备后必须恢复映射计算器的 Controller 引用。设备可能已经由
+    # new_device.start() 启动过计算器，因此 set_device_provider() 也需要支持
+    # 对运行中计算器重载映射并重新订阅当前内存中的新测点。
+    mappings = await asyncio.to_thread(PointMappingService.get_all_mappings)
+    await asyncio.to_thread(new_device.set_device_provider, device_controller, mappings)
+
+    if is_start and previous_auto_read_config is not None:
+        await new_device.start_auto_read(previous_auto_read_config)
+
+    if is_start and same_protocol and was_simulating and new_device.is_protocol_running():
+        new_device.startSimulation()
 
     log.info(f"设备 {device_name} 实例已更新 (启动状态: {is_start})")
     return new_device

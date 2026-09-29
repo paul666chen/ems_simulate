@@ -70,6 +70,15 @@
         <el-icon class="icon"><Document /></el-icon>
         <span>{{ $t("device.viewMessages") }}</span>
       </el-button>
+      <el-button
+        v-if="connectionMonitoringSupported"
+        class="button btn-connections"
+        @click="showConnectionMonitor = true"
+      >
+        <el-icon class="icon"><User /></el-icon>
+        <span>{{ t("connectionMonitor.entry") }}</span>
+        <span class="connection-count-badge">{{ currentConnectionCount }}</span>
+      </el-button>
     </el-row>
 
     <!-- 第二行：IEC61850 模型管理 + 仿真模拟控制 -->
@@ -165,9 +174,7 @@
                 class="button btn-config"
                 @click="showSimConfigDialog = true"
                 :disabled="
-                  !deviceStatus ||
-                  isClientDevice ||
-                  (isIec61850Protocol && !modelLoaded)
+                  isClientDevice || (isIec61850Protocol && !modelLoaded)
                 "
               >
                 <template #icon>
@@ -230,6 +237,13 @@
     <!-- 报文查看对话框 -->
     <MessageViewDialog v-model="showMessageDialog" :device-name="routeName" />
 
+    <ConnectionMonitorDialog
+      v-model="showConnectionMonitor"
+      :device-name="routeName"
+      :server-name="String(communicationType || routeName)"
+      :endpoint="connectionEndpoint"
+    />
+
     <!-- 模型导出对话框 -->
     <ModelExportDialog v-model="showExportDialog" :device-name="routeName" />
 
@@ -237,9 +251,8 @@
     <SimulationConfigDialog
       v-model="showSimConfigDialog"
       :device-name="routeName"
-      :saved-config="savedSimConfig"
+      :device-running="deviceStatus"
       :simulation-running="simulationStatus"
-      @save="handleSaveSimConfig"
       @simulation-changed="(v: boolean) => (simulationStatus = v)"
     />
   </el-col>
@@ -261,6 +274,7 @@ import { useRoute } from "vue-router";
 import TextNode from "@/components/common/TextNode.vue";
 import Slave from "@/components/device/Slave.vue";
 import MessageViewDialog from "@/components/device/MessageViewDialog.vue";
+import ConnectionMonitorDialog from "@/components/device/ConnectionMonitorDialog.vue";
 import SimulationConfigDialog from "@/components/point/SimulationConfigDialog.vue";
 import { isTauri, openMessageWindow } from "@/utils/tauri";
 import ModelExportDialog from "@/components/device/ModelExportDialog.vue";
@@ -275,12 +289,8 @@ import {
   discoverIEC61850Model,
   checkIEC61850ModelCache,
   loadIEC61850ModelFromCache,
-  applySimulationConfig,
 } from "@/api/deviceApi";
-import type {
-  IEC61850ConnectProgress,
-  SimulationConfigItem,
-} from "@/api/deviceApi";
+import type { IEC61850ConnectProgress } from "@/api/deviceApi";
 import { triggerSidebarRefresh } from "@/composables";
 import {
   acquireAutoRefreshPause,
@@ -296,9 +306,11 @@ import {
   Search,
   Upload,
   Setting,
+  User,
 } from "@element-plus/icons-vue";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { HTTP_TIMEOUT_MODEL_DISCOVERY } from "@/constants";
+import { isSerialConnectionType } from "@/constants/protocol";
 import { showError, showErrorOnce } from "@/api/http";
 
 const route = useRoute();
@@ -316,10 +328,24 @@ const ip = ref<any>("");
 const port = ref<any>("");
 const serialPort = ref<string | null>(null);
 const baudrate = ref<number>(9600);
+const connectionType = ref<number | null>(null);
 const communicationType = ref<any>("");
 const deviceStatus = ref<boolean>(false);
 const simulationStatus = ref<boolean>(false);
 const showMessageDialog = ref<boolean>(false);
+const showConnectionMonitor = ref<boolean>(false);
+const connectionMonitoringSupported = ref(false);
+const currentConnectionCount = ref(0);
+
+const connectionEndpoint = computed(() => {
+  if (!ip.value) return "-";
+  const host = String(ip.value).includes(":")
+    ? `[${ip.value}]`
+    : String(ip.value);
+  return port.value === null || port.value === undefined
+    ? host
+    : `${host}:${port.value}`;
+});
 
 const handleOpenMessageView = async () => {
   if (!isTauri()) {
@@ -360,12 +386,7 @@ const simulationStatusStr = computed(() => {
 });
 
 const isSerialMode = computed(() => {
-  const type = communicationType.value;
-  return (
-    type &&
-    (type.includes("Dlt645") || type.startsWith("ModbusRtu")) &&
-    serialPort.value
-  );
+  return isSerialConnectionType(connectionType.value);
 });
 
 const isClientDevice = computed(() => {
@@ -426,12 +447,6 @@ const isAnyModelProcessing = computed(
 
 // 测点级模拟配置 Dialog
 const showSimConfigDialog = ref<boolean>(false);
-const savedSimConfig = ref<SimulationConfigItem[] | null>(null);
-
-const handleSaveSimConfig = (config: SimulationConfigItem[]) => {
-  // D1：保存仅暂存前端；点"开始模拟"时再应用
-  savedSimConfig.value = config;
-};
 
 const isDeviceProcessing = ref<boolean>(false);
 const isSimProcessing = ref<boolean>(false);
@@ -657,10 +672,16 @@ const fetchDeviceInfo = async () => {
     port.value = info.get("port") || null;
     serialPort.value = info.get("serial_port") || null;
     baudrate.value = info.get("baudrate") || 9600;
+    connectionType.value = info.get("conn_type") ?? null;
     communicationType.value = info.get("type") || null;
     channelId.value = info.get("channel_id") ?? null;
     const serverStatus = info.get("server_status");
     deviceStatus.value = serverStatus;
+    connectionMonitoringSupported.value =
+      info.get("connection_monitoring_supported") === true;
+    currentConnectionCount.value = Number(
+      info.get("current_connection_count") || 0,
+    );
     // 初始化防抖状态，避免初始加载时误弹通知
     lastNotifyServerStatus = serverStatus;
     stableServerStatus = serverStatus;
@@ -697,10 +718,6 @@ const startFunction = async () => {
         simulationStatus.value = false;
       }
     } else {
-      // D1：开始模拟前先应用本地保存的测点模拟配置（未保存过则走后端默认全量模拟）
-      if (savedSimConfig.value !== null) {
-        await applySimulationConfig(routeName.value, savedSimConfig.value);
-      }
       if (await startSimulation(routeName.value)) {
         simulationStatus.value = true;
       }
@@ -939,6 +956,11 @@ const fetchDeviceStatus = async () => {
 
     // 同步显示参数（波特率可能在运行中被"更改通信速率"命令更新）
     baudrate.value = info.get("baudrate") || 9600;
+    connectionMonitoringSupported.value =
+      info.get("connection_monitoring_supported") === true;
+    currentConnectionCount.value = Number(
+      info.get("current_connection_count") || 0,
+    );
 
     // 更新显示状态（不受防抖影响，UI 始终反映最新值）
     // IEC61850 连接中时，不覆盖"连接中"状态（后端 is_running 在连接完成前为 false）
@@ -1200,6 +1222,25 @@ watch(
 .btn-info {
   background-color: #6366f1;
   box-shadow: 0 4px 12px rgba(99, 102, 241, 0.25);
+}
+
+.btn-connections {
+  background-color: var(--color-primary);
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
+}
+
+.connection-count-badge {
+  min-width: 20px;
+  height: 20px;
+  margin-left: 4px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.2);
+  font-size: 11px;
+  line-height: 20px;
 }
 
 .btn-export {

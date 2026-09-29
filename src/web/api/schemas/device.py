@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from src.enums.point_data import SimulateMethod
@@ -9,6 +11,20 @@ class DeviceNameListResponse:
 
 class DeviceInfoRequest(BaseModel):
     device_name: str
+
+
+class AutoReadStartRequest(BaseModel):
+    device_name: str
+    mode: Literal["batch", "single", "dataset"] = "batch"
+    cycle_interval_ms: int = Field(1000, ge=100, le=3_600_000)
+    request_interval_ms: int = Field(0, ge=0, le=3_600_000)
+    slave_id: int | None = None
+    channel_id: int | None = None
+    category: str = ""
+    item: str = ""
+    point_types: list[int] = Field(default_factory=list)
+    dlt645_prefix: int | None = Field(None, ge=0, le=4)
+    dlt645_settlement: int | None = Field(None, ge=0, le=12)
 
 
 class DLT645CommandRequest(BaseModel):
@@ -48,6 +64,8 @@ class DeviceTableRequest(BaseModel):
     iec104_types: list[str] | None = None  # 为空表示全部 IEC104 ASDU 类型
     dlt645_prefix: int | None = Field(None, ge=0, le=4)
     dlt645_settlement: int | None = Field(None, ge=0, le=12)
+    dnp3_event_class: int | None = Field(None, ge=1, le=3)
+    dnp3_event_enabled: bool | None = None
 
 
 class SimulationStartRequest(BaseModel):
@@ -61,7 +79,8 @@ class SimulationConfigItem(BaseModel):
     point_code: str
     enabled: bool | None = Field(None, description="是否参与模拟")
     simulate_method: SimulateMethod | None = Field(None, description="模拟方式")
-    step: int | None = Field(None, ge=1, description="模拟步长")
+    step: float | None = Field(None, gt=0, description="模拟步长，支持浮点数")
+    fixed_value: float | int | None = Field(None, description="定值模拟的目标值")
 
 
 class ApplySimulationConfigRequest(BaseModel):
@@ -103,6 +122,14 @@ class DeviceGroupStatusRequest(BaseModel):
 class ManualReadRequest(BaseModel):
     device_name: str
     interval: int | None = 0
+    mode: Literal["batch", "single", "dataset"] = "batch"
+    slave_id: int | None = None
+    channel_id: int | None = None
+    category: str = ""
+    item: str = ""
+    point_types: list[int] = Field(default_factory=list)
+    dlt645_prefix: int | None = Field(None, ge=0, le=4)
+    dlt645_settlement: int | None = Field(None, ge=0, le=12)
 
 
 class MessageListRequest(BaseModel):

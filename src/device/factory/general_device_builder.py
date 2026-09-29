@@ -32,7 +32,7 @@ class GeneralDeviceBuilder:
         self.path: str | None = None
         self.serial_port: str | None = None
         self.is_start: bool = False
-        self.protocol_type: ProtocolType = ProtocolType.ModbusTcp
+        self.protocol_type: ProtocolType = ProtocolType.ModbusTcpServer
 
     def setDeviceId(self, device_id: int) -> None:
         self.general_device.set_device_id(device_id)
@@ -86,6 +86,12 @@ class GeneralDeviceBuilder:
     def initIec104Client(self) -> None:
         self.general_device.initIec104Client()
 
+    def initIec101Server(self) -> None:
+        self.general_device.initIec101Server()
+
+    def initIec101Client(self) -> None:
+        self.general_device.initIec101Client()
+
     def initDlt645Server(self) -> None:
         self.general_device.initDlt645Server()
 
@@ -125,7 +131,12 @@ class GeneralDeviceBuilder:
         self.is_start = is_start
         self.protocol_type = protocol_type
 
-        if protocol_type in [ProtocolType.ModbusTcp, ProtocolType.ModbusRtuOverTcp]:
+        channel = ChannelService.get_channel_by_id(self.channel_id)
+        self.general_device.point_manager.set_change_tracking_enabled(
+            bool(channel and channel.get("change_tracking_enabled", False))
+        )
+
+        if protocol_type in [ProtocolType.ModbusTcpServer, ProtocolType.ModbusRtuOverTcp]:
             return self.generalDeviceModbusTcp
         elif protocol_type == ProtocolType.ModbusTcpClient:
             return self.generalDeviceModbusTcpClient
@@ -137,6 +148,10 @@ class GeneralDeviceBuilder:
             return self.generalDeviceIec104Server
         elif protocol_type == ProtocolType.Iec104Client:
             return self.generalDeviceIec104Client
+        elif protocol_type == ProtocolType.Iec101Server:
+            return self.generalDeviceIec101Server
+        elif protocol_type == ProtocolType.Iec101Client:
+            return self.generalDeviceIec101Client
         elif protocol_type == ProtocolType.Dlt645Server:
             return self.generalDeviceDlt645Server
         elif protocol_type == ProtocolType.Dlt645Client:
@@ -177,6 +192,24 @@ class GeneralDeviceBuilder:
         if self.is_start and isinstance(self.general_device.client, IEC104Client):
             print(f"start client: {self.general_device.client.ip} port: {self.general_device.client.port}")
             self.general_device.client.connect()
+        return self.general_device
+
+    @property
+    def generalDeviceIec101Server(self) -> Device:
+        self.setDeviceId(self.device_id)
+        self.setDeviceName(name=self.device_name)
+        self.importDataPoints()
+        self.initIec101Server()
+        self.general_device.setSpecialDataPointValues()
+        return self.general_device
+
+    @property
+    def generalDeviceIec101Client(self) -> Device:
+        self.setDeviceId(self.device_id)
+        self.setDeviceName(name=self.device_name)
+        self.importDataPoints()
+        self.initIec101Client()
+        self.general_device.setSpecialDataPointValues()
         return self.general_device
 
     @property

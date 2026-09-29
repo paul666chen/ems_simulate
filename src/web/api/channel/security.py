@@ -20,11 +20,23 @@ router = APIRouter(tags=["channel"])
 _MAX_FILE_SIZE = 5 * 1024 * 1024
 _CERTIFICATE_SUFFIXES = {".crt", ".cer", ".pem"}
 _PRIVATE_KEY_SUFFIXES = {".key", ".pem"}
+_TLS_SUPPORTED_PROTOCOLS = {1, 2, 4, 5}
+
+
+def _validate_tls_protocol(protocol_type: int) -> None:
+    if protocol_type not in _TLS_SUPPORTED_PROTOCOLS:
+        raise ValidationError("当前协议暂不支持 TLS")
 
 
 def _validate_tls_mode(protocol_type: int, tls_mode: str) -> None:
     if tls_mode not in {"one_way", "mutual"}:
         raise ValidationError("TLS 模式必须是单向认证 TLS 或双向认证 TLS")
+
+
+def _normalize_tls_version(tls_version: str) -> str:
+    if tls_version not in {"1.2", "1.3"}:
+        raise ValidationError("TLS 版本必须是 1.2 或 1.3")
+    return tls_version
 
 
 def _tls_material_requirements(conn_type: int, tls_mode: str) -> tuple[bool, bool]:
@@ -109,6 +121,7 @@ async def upload_security_config(
     channel_id: int = Form(...),
     tls_enabled: bool = Form(...),
     tls_mode: str = Form("one_way"),
+    tls_version: str = Form("1.2"),
     certificate: UploadFile | None = File(None),
     private_key: UploadFile | None = File(None),
     ca_certificate: UploadFile | None = File(None),
@@ -118,9 +131,10 @@ async def upload_security_config(
         raise NotFoundError("通道不存在")
     if tls_enabled and channel.get("conn_type") not in (1, 2):
         raise ValidationError("串口模式不支持 TLS")
-    if tls_enabled and channel.get("protocol_type") not in (1, 2, 4):
-        raise ValidationError("当前协议暂不支持 TLS")
+    if tls_enabled:
+        _validate_tls_protocol(channel.get("protocol_type"))
     _validate_tls_mode(channel.get("protocol_type"), tls_mode)
+    tls_version = _normalize_tls_version(tls_version)
 
     current = ChannelConfigurationService.get_runtime_security(channel_id)
     certificate_path = current.get("certificate_path")
@@ -132,7 +146,9 @@ async def upload_security_config(
 
     has_new_files = certificate is not None or private_key is not None or ca_certificate is not None
     settings_changed = (
-        bool(current.get("tls_enabled")) != tls_enabled or str(current.get("tls_mode") or "one_way") != tls_mode
+        bool(current.get("tls_enabled")) != tls_enabled
+        or str(current.get("tls_mode") or "one_way") != tls_mode
+        or str(current.get("tls_version") or "1.2") != tls_version
     )
     if not has_new_files and not settings_changed:
         return BaseResponse(
@@ -221,6 +237,7 @@ async def upload_security_config(
         channel_id,
         tls_enabled=tls_enabled,
         tls_mode=tls_mode,
+        tls_version=tls_version,
         certificate_path=certificate_path,
         certificate_filename=certificate_filename,
         private_key_path=private_key_path,

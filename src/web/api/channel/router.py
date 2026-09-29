@@ -9,6 +9,7 @@ from src.data.dao.point_dao import PointDao
 from src.data.service.channel_configuration_service import ChannelConfigurationService
 from src.data.service.channel_service import ChannelService
 from src.data.service.device_group_service import DeviceGroupService
+from src.data.service.point_mapping_service import PointMappingService
 from src.device.protocol.runtime_config import normalize_protocol_params
 from src.enums.modbus_def import ProtocolType
 from src.web.api.channel.helpers import (
@@ -74,6 +75,7 @@ PROTOCOL_OPTIONS = [
     {"value": 3, "label": "DL/T645-2007", "conn_types": [0, 1, 2, 3]},
     {"value": 4, "label": "IEC 61850", "conn_types": [1, 2]},
     {"value": 5, "label": "DNP3", "conn_types": [1, 2]},
+    {"value": 6, "label": "IEC 101", "conn_types": [0, 3]},
 ]
 
 # 连接类型映射
@@ -191,6 +193,7 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
         parity=req.parity,
         rtu_addr=req.rtu_addr if req.protocol_type == 3 else "1",
         dlt645_point_mode=req.dlt645_point_mode if req.protocol_type == 3 else "import",
+        change_tracking_enabled=req.change_tracking_enabled,
         model_name=req.model_name if req.protocol_type == 4 else None,
     )
 
@@ -249,6 +252,8 @@ async def create_channel(req: ChannelCreateRequest, request: Request):
         new_device.name = req.name
         device_controller.device_list.append(new_device)
         device_controller.device_map[new_device.name] = new_device
+        mappings = await asyncio.to_thread(PointMappingService.get_all_mappings)
+        await asyncio.to_thread(new_device.set_device_provider, device_controller, mappings)
         log.info(f"设备 {req.name} (ID: {channel_id}) 已在内存中动态创建")
     except Exception as e:
         log.error(f"内存同步创建设备失败: {e}")
@@ -362,6 +367,7 @@ async def update_channel(req: ChannelUpdateRequest, request: Request):
             "data_bits",
             "stop_bits",
             "parity",
+            "change_tracking_enabled",
         )
         if (value := getattr(req, field)) is not None
     }
@@ -379,10 +385,16 @@ async def update_channel(req: ChannelUpdateRequest, request: Request):
     elif protocol_combination_changed:
         requested_updates["model_name"] = None
 
-    # TCP 服务端唯一性检测：IP+端口 组合唯一（排除自身），须在写库前完成
-    if conn_type_to_use == 2:
-        new_ip = req.ip if req.ip is not None else existing.get("ip")
-        new_port = req.port if req.port is not None else existing.get("port")
+    # TCP 服务端唯一性检测只在切换为服务端或端点实际变化时执行。
+    # 名称、分组等无关编辑不应查询真实通道表，更不应被历史冲突数据阻断。
+    new_ip = req.ip if req.ip is not None else existing.get("ip")
+    new_port = req.port if req.port is not None else existing.get("port")
+    server_endpoint_changed = (
+        conn_type_to_use != existing.get("conn_type", 1)
+        or (new_ip or "").strip() != (existing.get("ip") or "").strip()
+        or str(new_port or "") != str(existing.get("port") or "")
+    )
+    if conn_type_to_use == 2 and server_endpoint_changed:
         _validate_server_endpoint_unique(new_ip, new_port, exclude_channel_id=channel_id)
 
     # 设备分组变更：group_id 存储在 Device 表，由 DeviceGroupService 统一更新。
@@ -443,6 +455,10 @@ async def update_channel(req: ChannelUpdateRequest, request: Request):
                     device_controller.device_map.pop(key, None)
                 device.name = req.name
                 device_controller.device_map[req.name] = device
+        if req.change_tracking_enabled is not None:
+            device = device_controller.get_device_by_id(channel_id)
+            if device is not None:
+                device.point_manager.set_change_tracking_enabled(req.change_tracking_enabled)
     except Exception as e:
         log.error(f"更新配置后同步运行时设备失败: {e}")
     return BaseResponse(message="更新通道成功", data=True)

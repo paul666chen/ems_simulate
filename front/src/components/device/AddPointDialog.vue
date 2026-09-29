@@ -139,65 +139,16 @@
           :placeholder="$t('point.selectDecodeCode')"
           style="width: 100%"
         >
-          <el-option-group :label="$t('decode.bit8')">
-            <el-option label="0x10 - Byte (unsigned)" value="0x10" />
-            <el-option label="0x11 - Byte (signed)" value="0x11" />
-          </el-option-group>
-          <el-option-group :label="$t('decode.int16')">
-            <el-option label="0x20 - Short AB (big endian)" value="0x20" />
-            <el-option label="0x21 - Short AB (signed)" value="0x21" />
-            <el-option label="0x22 - Short BA (byte swap)" value="0x22" />
-            <el-option label="0xB0 - Short BA (unsigned)" value="0xB0" />
-            <el-option label="0xB1 - Short BA (signed)" value="0xB1" />
-            <el-option label="0xC0 - Short CD (little endian)" value="0xC0" />
-            <el-option label="0xC1 - Short CD (signed)" value="0xC1" />
-          </el-option-group>
-          <el-option-group :label="$t('decode.int32')">
-            <el-option label="0x40 - Long AB CD (big endian)" value="0x40" />
-            <el-option label="0x41 - Long AB CD (signed)" value="0x41" />
-            <el-option label="0x43 - Long BA DC (big word swap)" value="0x43" />
-            <el-option label="0x44 - Long BA DC (signed)" value="0x44" />
-            <el-option label="0xD0 - Long DC BA (little endian)" value="0xD0" />
-            <el-option label="0xD1 - Long DC BA (signed)" value="0xD1" />
+          <el-option-group
+            v-for="group in DECODE_GROUPS"
+            :key="group.labelKey"
+            :label="$t(group.labelKey)"
+          >
             <el-option
-              label="0xD4 - Long CD AB (little word swap)"
-              value="0xD4"
-            />
-            <el-option label="0xD5 - Long CD AB (signed)" value="0xD5" />
-          </el-option-group>
-          <el-option-group :label="$t('decode.float32')">
-            <el-option label="0x42 - Float AB CD (big endian)" value="0x42" />
-            <el-option
-              label="0x45 - Float BA DC (big word swap)"
-              value="0x45"
-            />
-            <el-option
-              label="0xD2 - Float DC BA (little endian)"
-              value="0xD2"
-            />
-            <el-option
-              label="0xD3 - Float CD AB (little word swap)"
-              value="0xD3"
-            />
-          </el-option-group>
-          <el-option-group :label="$t('decode.int64')">
-            <el-option
-              label="0x60 - Int64 AB CD EF GH (big endian)"
-              value="0x60"
-            />
-            <el-option label="0x61 - Int64 AB CD EF GH (signed)" value="0x61" />
-            <el-option
-              label="0x62 - Double AB CD EF GH (big endian)"
-              value="0x62"
-            />
-            <el-option
-              label="0xE0 - Int64 HG FE DC BA (little endian)"
-              value="0xE0"
-            />
-            <el-option label="0xE1 - Int64 HG FE DC BA (signed)" value="0xE1" />
-            <el-option
-              label="0xE2 - Double HG FE DC BA (little endian)"
-              value="0xE2"
+              v-for="code in group.codes"
+              :key="code"
+              :label="getDecodeOptionLabel(code, $t)"
+              :value="code"
             />
           </el-option-group>
         </el-select>
@@ -216,6 +167,117 @@
             :value-on-clear="null"
           />
         </el-form-item>
+      </template>
+
+      <template v-if="isDnp3 && formData.dnp3_config">
+        <el-divider content-position="left">DNP3</el-divider>
+        <el-form-item :label="$t('point.dnp3StaticVariation')">
+          <el-select
+            v-model="formData.dnp3_config.static_variation"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="v in dnp3StaticVariations"
+              :key="v"
+              :label="`V${v}`"
+              :value="v"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="$t('point.dnp3EventVariation')">
+          <el-select
+            v-model="formData.dnp3_config.event_variation"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="v in dnp3EventVariations"
+              :key="v"
+              :label="`V${v}`"
+              :value="v"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item :label="$t('point.dnp3EventClass')">
+          <el-select
+            v-model="formData.dnp3_config.event_class"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="v in [1, 2, 3]"
+              :key="v"
+              :label="`Class ${v}`"
+              :value="v"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item
+          v-if="formData.frame_type === 0"
+          :label="$t('point.dnp3Deadband')"
+        >
+          <el-input-number
+            v-model="formData.dnp3_config.deadband"
+            :min="0"
+            :step="0.1"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <template v-if="[2, 3].includes(formData.frame_type)">
+          <el-form-item :label="$t('point.dnp3ControlMode')">
+            <el-select
+              v-model="formData.dnp3_config.control_mode"
+              style="width: 100%"
+            >
+              <el-option label="Direct Operate" value="direct" />
+              <el-option label="Select Before Operate" value="sbo" />
+            </el-select>
+          </el-form-item>
+        </template>
+        <template v-if="formData.frame_type === 2">
+          <el-form-item :label="$t('point.dnp3CrobOperation')">
+            <el-select
+              v-model="formData.dnp3_config.crob_operation"
+              style="width: 100%"
+            >
+              <el-option label="Latch" value="latch" />
+              <el-option label="Pulse" value="pulse" />
+            </el-select>
+          </el-form-item>
+          <template v-if="formData.dnp3_config.crob_operation === 'pulse'">
+            <el-form-item :label="$t('point.dnp3PulseOn')"
+              ><el-input-number
+                v-model="formData.dnp3_config.pulse_on_ms"
+                :min="0"
+                style="width: 100%"
+            /></el-form-item>
+            <el-form-item :label="$t('point.dnp3PulseOff')"
+              ><el-input-number
+                v-model="formData.dnp3_config.pulse_off_ms"
+                :min="0"
+                style="width: 100%"
+            /></el-form-item>
+            <el-form-item :label="$t('point.dnp3PulseCount')"
+              ><el-input-number
+                v-model="formData.dnp3_config.pulse_count"
+                :min="1"
+                :max="255"
+                style="width: 100%"
+            /></el-form-item>
+          </template>
+        </template>
+        <el-form-item :label="$t('point.dnp3InitialQuality')">
+          <el-input-number
+            v-model="formData.dnp3_config.initial_quality"
+            :min="0"
+            :max="255"
+            style="width: 100%"
+          />
+        </el-form-item>
+        <el-form-item :label="$t('point.dnp3EventEnabled')"
+          ><el-switch v-model="formData.dnp3_config.event_enabled"
+        /></el-form-item>
+        <el-form-item :label="$t('point.dnp3TimestampEnabled')"
+          ><el-switch v-model="formData.dnp3_config.timestamp_enabled"
+        /></el-form-item>
       </template>
 
       <el-form-item
@@ -298,6 +360,11 @@ import { useI18n } from "vue-i18n";
 import type { FormInstance, FormRules } from "element-plus";
 import { ElMessage } from "element-plus";
 import { showErrorOnce } from "@/api/http";
+import {
+  DECODE_GROUPS,
+  getDecodeOptionLabel,
+  getRegisterSpan,
+} from "@/constants/decode";
 import { addPoint, addPointsBatch, type PointCreateData } from "@/api/pointApi";
 import {
   IEC104_TYPES_BY_FRAME_TYPE,
@@ -321,7 +388,12 @@ const props = defineProps<{
 // 判断是否为 IEC104 协议（IEC104 不需要功能码）
 const isIec104 = computed(() => {
   const pt = props.protocolType || "";
-  return pt === "Iec104Client" || pt === "Iec104Server";
+  return [
+    "Iec104Client",
+    "Iec104Server",
+    "Iec101Client",
+    "Iec101Server",
+  ].includes(pt);
 });
 
 // 判断是否为 IEC61850 协议（IEC61850 不需要从机地址）
@@ -382,13 +454,43 @@ const formData = reactive<PointCreateData>({
   rtu_addr: 1,
   reg_addr: "0",
   func_code: 3,
-  decode_code: "0x20",
+  decode_code: "UINT16_AB",
   bit: null,
   mul_coe: 1.0,
   add_coe: 0.0,
   iec_type_id: null,
   iec_quality: 0,
+  dnp3_config: {
+    static_variation: 5,
+    event_variation: 7,
+    event_class: 1,
+    deadband: 0,
+    control_mode: "direct",
+    crob_operation: "latch",
+    pulse_on_ms: 100,
+    pulse_off_ms: 100,
+    pulse_count: 1,
+    initial_quality: 1,
+    event_enabled: true,
+    timestamp_enabled: true,
+  },
 });
+
+const dnp3StaticVariations = computed(
+  () =>
+    ({ 0: [1, 2, 3, 4, 5, 6], 1: [1, 2], 2: [1, 2], 3: [1, 2, 3, 4] })[
+      formData.frame_type
+    ] || [1],
+);
+const dnp3EventVariations = computed(
+  () =>
+    ({
+      0: [1, 2, 3, 4, 5, 6, 7, 8],
+      1: [1, 2, 3],
+      2: [1, 2],
+      3: [1, 2, 3, 4, 5, 6, 7, 8],
+    })[formData.frame_type] || [1],
+);
 
 // 品质描述符标志位
 const qualityFlags = reactive({
@@ -434,6 +536,15 @@ watch(
       formData.iec_type_id = getDefaultIec104Type(newType);
       formData.reg_addr = String(iec104AddressOffset[newType] ?? 0);
     }
+    if (isDnp3.value && formData.dnp3_config) {
+      const defaults = { 0: [5, 7], 1: [2, 2], 2: [2, 1], 3: [3, 3] }[
+        newType
+      ] || [1, 1];
+      formData.dnp3_config.static_variation = defaults[0];
+      formData.dnp3_config.event_variation = defaults[1];
+      formData.dnp3_config.event_class = [2, 3].includes(newType) ? 2 : 1;
+      formData.dnp3_config.event_enabled = [0, 1].includes(newType);
+    }
   },
 );
 
@@ -462,35 +573,6 @@ const validFuncCodes = computed(() => {
 
   return allCodes;
 });
-
-// 根据解析码计算寄存器跨度
-const getRegisterSpan = (decodeCode: string): number => {
-  // 64位解析码占4个寄存器
-  if (["0x60", "0x61", "0x62", "0xE0", "0xE1", "0xE2"].includes(decodeCode)) {
-    return 4;
-  }
-  // 32位解析码占2个寄存器
-  if (
-    [
-      "0x40",
-      "0x41",
-      "0x42",
-      "0x43",
-      "0x44",
-      "0x45",
-      "0xD0",
-      "0xD1",
-      "0xD2",
-      "0xD3",
-      "0xD4",
-      "0xD5",
-    ].includes(decodeCode)
-  ) {
-    return 2;
-  }
-  // 8位和16位占1个寄存器
-  return 1;
-};
 
 const rules = computed<FormRules>(() => ({
   frame_type: [
@@ -580,6 +662,7 @@ const handleSubmit = async () => {
       for (let i = 0; i < batchCount.value; i++) {
         points.push({
           ...formData,
+          dnp3_config: isDnp3.value ? { ...formData.dnp3_config! } : undefined,
           code: `${codePrefix.value}${String(i + 1).padStart(3, "0")}`,
           name: `${namePrefix.value}${i + 1}`,
           reg_addr: String(startAddr + i * span),
@@ -609,7 +692,10 @@ const handleSubmit = async () => {
         qualityFlags,
         formData.frame_type,
       );
-      const success = await addPoint(props.deviceName, formData);
+      const success = await addPoint(props.deviceName, {
+        ...formData,
+        dnp3_config: isDnp3.value ? { ...formData.dnp3_config! } : undefined,
+      });
       if (success) {
         ElMessage.success(t("point.addSuccess"));
         emit("success");

@@ -45,6 +45,25 @@ IEC104_SERVER_DEFAULTS = {
     "max_connections": 0,
 }
 
+IEC101_COMMON_DEFAULTS = {
+    "link_mode": "unbalanced",
+    "link_address": 1,
+    "link_address_size": 1,
+    "cause_size": 2,
+    "common_address_size": 2,
+    "io_address_size": 3,
+    "response_timeout_ms": 1000,
+}
+
+IEC101_CLIENT_DEFAULTS = {
+    **IEC101_COMMON_DEFAULTS,
+    "poll_interval_ms": 200,
+    "originator_address": 0,
+    "general_interrogation_on_connect": True,
+}
+
+IEC101_SERVER_DEFAULTS = dict(IEC101_COMMON_DEFAULTS)
+
 DLT645_CLIENT_DEFAULTS = {
     "command_timeout_ms": 3000,
 }
@@ -78,31 +97,45 @@ IEC61850_SERVER_DEFAULTS = {
 
 # DNP3 客户端（Master）默认运行参数
 DNP3_CLIENT_DEFAULTS = {
-    "local_address": 1,
-    "remote_address": 0,
-    "address_size": 2,
-    "link_confirm": True,
-    "app_confirm": True,
-    "time_sync_enabled": True,
-    "integrity_interval_s": 60,
-    "event_interval_s": 5,
-    "enable_unsolicited": False,
+    "local_address": 0,
+    "remote_address": 1,
     "connection_timeout_ms": 3000,
     "command_timeout_ms": 3000,
     "max_retries": 3,
+    "reconnect_initial_interval_ms": 1000,
+    "reconnect_max_interval_ms": 30000,
+    "reconnect_max_attempts": 0,
+    "time_sync_enabled": False,
+    "event_interval_s": 5,
+    "enable_unsolicited": False,
+    "cache_ttl_ms": 0,
+    "link_confirm": False,
+    "link_confirm_timeout_ms": 1000,
+    "link_confirm_max_retries": 2,
 }
 
 # DNP3 服务端（Outstation）默认运行参数
 DNP3_SERVER_DEFAULTS = {
     "local_address": 1,
     "remote_address": 0,
-    "address_size": 2,
-    "link_confirm": True,
-    "app_confirm": True,
-    "enable_unsolicited": False,
     "event_buffer_size": 1000,
     "select_timeout_s": 10,
-    "max_connections": 0,
+    "app_confirm": True,
+    "enable_unsolicited": False,
+    "confirm_timeout_ms": 5000,
+    "confirm_max_retries": 2,
+    "link_confirm": False,
+    "link_confirm_timeout_ms": 1000,
+    "link_confirm_max_retries": 2,
+}
+
+# Older saved channels may still contain these UI fields. They never affected the
+# current protocol stack, so accept-and-drop them during normalization instead of
+# breaking existing channels or continuing to advertise unsupported behavior.
+_DNP3_LEGACY_IGNORED = {
+    "address_size",
+    "integrity_interval_s",
+    "max_connections",
 }
 
 # Keys use the persisted protocol_type and conn_type values.
@@ -120,6 +153,8 @@ _DEFAULTS: dict[tuple[int, int], dict[str, int | bool | str]] = {
     (4, 2): IEC61850_SERVER_DEFAULTS,
     (5, 1): DNP3_CLIENT_DEFAULTS,
     (5, 2): DNP3_SERVER_DEFAULTS,
+    (6, 0): IEC101_CLIENT_DEFAULTS,
+    (6, 3): IEC101_SERVER_DEFAULTS,
 }
 
 _RANGES: dict[str, tuple[int, int]] = {
@@ -158,6 +193,19 @@ _RANGES: dict[str, tuple[int, int]] = {
     "event_buffer_size": (1, 100000),
     "select_timeout_s": (1, 60),
     "max_retries": (0, 100),
+    "cache_ttl_ms": (0, 86400000),
+    "confirm_timeout_ms": (100, 120000),
+    "confirm_max_retries": (0, 100),
+    "link_confirm_timeout_ms": (100, 120000),
+    "link_confirm_max_retries": (0, 100),
+    # IEC101
+    "link_address": (0, 65535),
+    "link_address_size": (1, 2),
+    "cause_size": (1, 2),
+    "common_address_size": (1, 2),
+    "io_address_size": (1, 3),
+    "response_timeout_ms": (100, 120000),
+    "poll_interval_ms": (10, 60000),
 }
 
 _AP_TITLE_FIELDS = {"remote_ap_title", "local_ap_title"}
@@ -185,6 +233,9 @@ def get_protocol_param_defaults(protocol_type: int, conn_type: int) -> dict[str,
 def normalize_protocol_params(protocol_type: int, conn_type: int, values: dict[str, Any] | None) -> dict[str, Any]:
     defaults = get_protocol_param_defaults(protocol_type, conn_type)
     incoming = dict(values or {})
+    if protocol_type == 5:
+        for legacy_name in _DNP3_LEGACY_IGNORED:
+            incoming.pop(legacy_name, None)
     if protocol_type == 2:
         for legacy_name, current_name in _IEC104_LEGACY_TIME_PARAMS.items():
             if legacy_name not in incoming:
@@ -206,7 +257,11 @@ def normalize_protocol_params(protocol_type: int, conn_type: int, values: dict[s
             if not isinstance(value, str):
                 raise ValueError(f"参数 {name} 必须是字符串")
             value = value.strip()
-            if name in _AP_TITLE_FIELDS:
+            if name == "link_mode":
+                value = value.lower()
+                if value not in {"unbalanced", "balanced"}:
+                    raise ValueError("参数 link_mode 必须是 unbalanced 或 balanced")
+            elif name in _AP_TITLE_FIELDS:
                 parts = [part.strip() for part in re.split(r"[,.]", value)]
                 if not parts or any(not part.isdigit() for part in parts):
                     raise ValueError(f"参数 {name} 必须是逗号或点分隔的数字，例如 1,1,1,999,1")
@@ -245,4 +300,10 @@ def normalize_protocol_params(protocol_type: int, conn_type: int, values: dict[s
         raise ValueError("IEC104 接收窗口 w 不能大于发送窗口 k")
     if result.get("authentication_enabled") and not result.get("authentication_password"):
         raise ValueError("启用 IEC61850 用户认证时必须填写认证密码")
+    link_address = result.get("link_address")
+    link_address_size = result.get("link_address_size")
+    if link_address is not None and link_address_size is not None:
+        maximum_link_address = (1 << (8 * int(link_address_size))) - 1
+        if int(link_address) > maximum_link_address:
+            raise ValueError(f"IEC101 链路地址在 {link_address_size} 字节模式下不能大于 {maximum_link_address}")
     return result
