@@ -3,6 +3,8 @@
 统一管理四类测点：遥测、遥信、遥调、遥控
 """
 
+from collections import defaultdict
+
 from src.data.service.yc_service import YcService
 from src.data.service.yx_service import YxService
 from src.enums.modbus_def import ProtocolType
@@ -16,11 +18,11 @@ class PointManager:
 
     def __init__(self):
         self.change_tracking_enabled: bool = False
-        # 按从机 ID 分组存储
-        self.yc_dict: dict[int, list[Yc]] = {}
-        self.yx_dict: dict[int, list[Yx]] = {}
-        self.yt_dict: dict[int, list[Yt]] = {}
-        self.yk_dict: dict[int, list[Yk]] = {}
+        # 按从机 ID 分组存储（支持 IEC104 公共地址 > 255）
+        self.yc_dict: dict[int, list[Yc]] = defaultdict(list)
+        self.yx_dict: dict[int, list[Yx]] = defaultdict(list)
+        self.yt_dict: dict[int, list[Yt]] = defaultdict(list)
+        self.yk_dict: dict[int, list[Yk]] = defaultdict(list)
 
         # 按编码索引（单从站场景，编码相同的后添加的覆盖先添加的）
         self.code_map: dict[str, BasePoint] = {}
@@ -35,9 +37,6 @@ class PointManager:
         # 从机 ID 列表
         self.slave_id_list: list[int] = []
 
-        # 初始化字典
-        self._init_dicts()
-
     def set_change_tracking_enabled(self, enabled: bool) -> None:
         """Apply the device setting to existing points and future registrations."""
         self.change_tracking_enabled = enabled
@@ -50,21 +49,22 @@ class PointManager:
         else:
             point.disable_change_tracking()
 
-    def _init_dicts(self) -> None:
-        """初始化测点字典"""
-        for slave_id in range(256):
-            self.yc_dict[slave_id] = []
-            self.yx_dict[slave_id] = []
-            self.yt_dict[slave_id] = []
-            self.yk_dict[slave_id] = []
+    def _ensure_slave_buckets(self, slave_id: int) -> None:
+        """确保指定从机地址下的四类测点列表已创建（兼容直接赋值场景）。"""
+        # defaultdict 已自动创建；显式触碰一次，保证四类桶齐全
+        _ = self.yc_dict[slave_id]
+        _ = self.yx_dict[slave_id]
+        _ = self.yt_dict[slave_id]
+        _ = self.yk_dict[slave_id]
 
     def add_point(self, slave_id: int, point: BasePoint) -> None:
         """添加测点
 
         Args:
-            slave_id: 从机 ID
+            slave_id: 从机 ID（Modbus 0-255；IEC104/101 公共地址 0-65534）
             point: 测点对象
         """
+        self._ensure_slave_buckets(slave_id)
         self._apply_change_tracking(point)
         # 添加到对应的字典
         if isinstance(point, Yt):
@@ -266,6 +266,16 @@ class PointManager:
         for point in yk_list:
             slave_id = point.rtu_addr
             self.add_point(slave_id, point)
+
+        # 测点中的 rtu_addr 可能尚未写入 Slave 表（历史 Excel 导入），补建以免编辑从机失败
+        try:
+            from src.data.service.slave_service import SlaveService
+
+            created = SlaveService.ensure_slaves_from_rtu_addrs(channel_id, list(self.slave_id_list))
+            if created:
+                log.info(f"PointManager: 从测点补建 {created} 条从机记录")
+        except Exception as e:
+            log.warning(f"PointManager: 补建从机记录失败: {e}")
 
         log.debug(
             f"PointManager: Imported {len(yc_list)} YC, {len(yx_list)} YX, {len(yt_list)} YT, {len(yk_list)} YK points"

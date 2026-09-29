@@ -179,8 +179,8 @@ class PointExporter:
                     "帧类型",
                 ]
             )
-            for slave_id in range(0, len(self.device.yc_dict)):
-                if len(self.device.yc_dict[slave_id]) > 0:
+            for slave_id in sorted(self.device.slave_id_list):
+                if len(self.device.yc_dict.get(slave_id, [])) > 0:
                     for yc in self.device.yc_dict[slave_id]:
                         # 全部导出为str格式
                         frame_type = frame_type_dict[yc.frame_type]
@@ -201,7 +201,7 @@ class PointExporter:
                     # 空一行
                     writer.writerow([])
 
-                if len(self.device.yx_dict[slave_id]) > 0:
+                if len(self.device.yx_dict.get(slave_id, [])) > 0:
                     for yx in self.device.yx_dict[slave_id]:
                         frame_type = frame_type_dict[yx.frame_type]
                         writer.writerow(

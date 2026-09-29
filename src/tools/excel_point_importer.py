@@ -274,10 +274,25 @@ class ExcelPointImporter:
 
         wb.close()
 
+        # 点表里的从机/公共地址需同步到 Slave 表，否则编辑从机时会报“从机不存在”
+        self._sync_slaves_from_imported_points()
+
         log.info(
             f"Excel导入完成: 遥测={self.yc_count}, 遥信={self.yx_count}, 遥控={self.yk_count}, 遥调={self.yt_count}"
         )
         return (self.yc_count, self.yx_count, self.yk_count, self.yt_count)
+
+    def _sync_slaves_from_imported_points(self) -> None:
+        """根据已导入测点的 rtu_addr 补建 Slave 表记录。"""
+        from src.data.dao.point_dao import PointDao
+        from src.data.service.slave_service import SlaveService
+
+        rtu_addrs = PointDao.get_rtu_addr_list(self.channel_id)
+        created = SlaveService.ensure_slaves_from_rtu_addrs(self.channel_id, rtu_addrs)
+        if created:
+            log.info(f"点表导入后补建从机记录 {created} 条: {rtu_addrs}")
+        elif rtu_addrs:
+            log.debug(f"点表从机地址已存在于 Slave 表: {rtu_addrs}")
 
     def _import_yc(self, sheet: Worksheet) -> None:
         """导入遥测点"""

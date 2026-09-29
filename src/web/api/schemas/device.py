@@ -148,7 +148,7 @@ class SlaveAddRequest(BaseModel):
     """添加从机请求"""
 
     device_name: str = Field(..., description="设备名称")
-    slave_id: int = Field(..., description="从机地址 (1-255)")
+    slave_id: int = Field(..., description="从机/装置地址（Modbus 0-255；IEC104/101 公共地址 0-65534）")
 
 
 class SlaveDeleteRequest(BaseModel):
@@ -163,7 +163,7 @@ class SlaveEditRequest(BaseModel):
 
     device_name: str = Field(..., description="设备名称")
     old_slave_id: int = Field(..., description="旧从机地址")
-    new_slave_id: int = Field(..., description="新从机地址 (1-255)")
+    new_slave_id: int = Field(..., description="新从机/装置地址（Modbus 0-255；IEC104/101 公共地址 0-65534）")
 
 
 class ExportModelRequest(BaseModel):

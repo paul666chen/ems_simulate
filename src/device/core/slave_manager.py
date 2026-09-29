@@ -118,10 +118,13 @@ class SlaveManager:
                 self._log.warning(f"从机 {slave_id} 不存在")
                 return False
 
-            # 1. 从数据库删除从机记录
-            if not SlaveService.delete_slave(self._device.device_id, slave_id):
-                self._log.error(f"从数据库删除从机失败: {slave_id}")
-                return False
+            # 1. 从数据库删除从机记录（点表导入场景可能本就无 Slave 行）
+            if SlaveService.slave_exists(self._device.device_id, slave_id):
+                if not SlaveService.delete_slave(self._device.device_id, slave_id):
+                    self._log.error(f"从数据库删除从机失败: {slave_id}")
+                    return False
+            else:
+                self._log.info(f"Slave 表无记录，仅清理测点与内存: slave_id={slave_id}")
 
             # 2. 清空该从机的所有测点
             self.clear_points_by_slave(slave_id)
@@ -180,6 +183,9 @@ class SlaveManager:
                 return False
 
             device_id = self._device.device_id
+
+            # 点表导入可能只有测点 rtu_addr、无 Slave 行：先补建再改地址
+            SlaveService.ensure_slave(device_id, old_slave_id, max_slave_id=max_id)
 
             # 1. 更新数据库中的从机地址
             if not SlaveService.update_slave_id(device_id, old_slave_id, new_slave_id, max_slave_id=max_id):

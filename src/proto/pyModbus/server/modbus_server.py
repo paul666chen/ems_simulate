@@ -724,8 +724,9 @@ class ModbusServer:
 
     # 业务部分
     def setAllRegisterValues(self, yc_dict, yx_dict):
-        for slave_id in range(0, len(yc_dict)):
-            yc_list = yc_dict.get(slave_id)
+        for slave_id, yc_list in yc_dict.items():
+            if not yc_list:
+                continue
             # 将遥测数据写入到寄存器中
             for i in range(0, len(yc_list)):
                 self.setValueByAddress(
@@ -735,8 +736,9 @@ class ModbusServer:
                     yc_list[i].value,
                 )
 
-        for slave_id in range(0, len(yx_dict)):
-            yx_list = yx_dict.get(slave_id)
+        for slave_id, yx_list in yx_dict.items():
+            if not yx_list:
+                continue
             # 将遥信数据写入到寄存器中
             for i in range(0, len(yx_list)):
                 self.setValueByAddress(

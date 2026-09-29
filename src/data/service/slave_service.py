@@ -59,3 +59,39 @@ class SlaveService:
             log.error(f"无效的新从机地址: {new_slave_id}（允许范围 0-{max_slave_id}）")
             return False
         return SlaveDao.update_slave_id(channel_id, old_slave_id, new_slave_id)
+
+    @classmethod
+    def ensure_slave(
+        cls,
+        channel_id: int,
+        slave_id: int,
+        name: str | None = None,
+        *,
+        max_slave_id: int = 65534,
+    ) -> bool:
+        """确保从机记录存在（点表导入补建用）。"""
+        if slave_id < 0 or slave_id > max_slave_id:
+            log.error(f"无效的从机地址: {slave_id}（允许范围 0-{max_slave_id}）")
+            return False
+        return SlaveDao.ensure_slave(channel_id, slave_id, name)
+
+    @classmethod
+    def ensure_slaves_from_rtu_addrs(
+        cls,
+        channel_id: int,
+        rtu_addrs: list[int],
+        *,
+        max_slave_id: int = 65534,
+    ) -> int:
+        """按测点中的 rtu_addr 批量补建 Slave 表记录。"""
+        valid = []
+        for raw in rtu_addrs:
+            try:
+                sid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= sid <= max_slave_id:
+                valid.append(sid)
+            else:
+                log.warning(f"跳过越界从机地址: {sid}")
+        return SlaveDao.ensure_slaves(channel_id, valid)
