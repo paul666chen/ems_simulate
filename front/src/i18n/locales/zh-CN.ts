@@ -613,6 +613,8 @@ export default {
   slave: {
     slaveAddress: "从机地址",
     slaveAddressPlaceholder: "请输入从机地址",
+    commonAddress: "装置地址（公共地址）",
+    commonAddressPlaceholder: "请输入装置地址 / ASDU 公共地址 (0-65534)",
     existingSlaves: "已存在的从机: {list}",
     slaveData: "测点数据",
     slaveLabel: "从机 {id}",
@@ -1281,13 +1283,18 @@ export default {
   },
   editSlave: {
     title: "编辑从机",
+    titleIec: "编辑装置地址",
     oldAddress: "原从机地址",
+    oldAddressIec: "原装置地址",
     newAddress: "新从机地址",
+    newAddressIec: "新装置地址",
     placeholder: "输入新从机地址 (0-255)",
+    placeholderIec: "输入新装置地址 / 公共地址 (0-65534)",
     existingHint: "已存在的从机: {slaves}",
     slaveExists: "从机 {id} 已存在",
     idRequired: "请输入从机地址",
     idRange: "从机地址范围: 0-255",
+    idRangeIec: "装置地址（公共地址）范围: 0-65534",
     editSuccess: "编辑从机成功",
   },
   settings: {

@@ -371,6 +371,7 @@
       v-model="showAddSlaveDialog"
       :deviceName="routeName"
       :existingSlaves="slaveIdList"
+      :protocolType="String(protocolType)"
       @success="handleSlaveAdded"
     />
 
@@ -381,6 +382,7 @@
       :deviceName="routeName"
       :existingSlaves="slaveIdList"
       :currentSlaveId="editSlaveId"
+      :protocolType="String(protocolType)"
       @success="handleSlaveEdited"
     />
 

@@ -628,6 +628,9 @@ export default {
   slave: {
     slaveAddress: "Slave Address",
     slaveAddressPlaceholder: "Please enter slave address",
+    commonAddress: "Device Address (Common Address)",
+    commonAddressPlaceholder:
+      "Enter device / ASDU common address (0-65534)",
     existingSlaves: "Existing slaves: {list}",
     slaveData: "Point Data",
     slaveLabel: "Slave {id}",
@@ -1306,13 +1309,18 @@ export default {
   },
   editSlave: {
     title: "Edit Slave",
+    titleIec: "Edit Device Address",
     oldAddress: "Old Slave Address",
+    oldAddressIec: "Old Device Address",
     newAddress: "New Slave Address",
+    newAddressIec: "New Device Address",
     placeholder: "Enter new slave address (0-255)",
+    placeholderIec: "Enter new device / common address (0-65534)",
     existingHint: "Existing slaves: {slaves}",
     slaveExists: "Slave {id} already exists",
     idRequired: "Please enter slave address",
     idRange: "Slave address range: 0-255",
+    idRangeIec: "Device address (common address) range: 0-65534",
     editSuccess: "Slave edited successfully",
   },
   settings: {

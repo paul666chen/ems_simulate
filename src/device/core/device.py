@@ -1097,12 +1097,143 @@ class Device:
         return self.slave_manager.edit_slave(old_slave_id, new_slave_id)
 
     def _reinit_protocol_for_iec104(self) -> None:
-        """重新初始化 IEC104 协议处理器"""
-        if self.protocol_handler:
-            self.protocol_handler = self._create_protocol_handler()
-            self.protocol_handler.initialize(self._build_protocol_config())
-            all_points = self.point_manager.get_all_points()
-            self.protocol_handler.add_points(all_points)
+        """重新初始化 IEC104/IEC101 协议处理器。
+
+        修改从机地址（公共地址/装置地址）后必须重建 Station。
+        若设备原先在运行，先停旧实例再启新实例，避免：
+        - 旧监听套接字占用端口；
+        - 新 handler 未 start，主站仍连到旧地址。
+        """
+        old_handler = self.protocol_handler
+        was_running = bool(old_handler and old_handler.is_running)
+        if old_handler is not None and was_running:
+            try:
+                self._stop_iec_handler_sync(old_handler)
+            except Exception as exc:
+                self.log.warning(f"停止旧 IEC 协议处理器失败: {exc}")
+
+        self.protocol_handler = self._create_protocol_handler()
+        self.protocol_handler.initialize(self._build_protocol_config())
+        all_points = self.point_manager.get_all_points()
+        self.protocol_handler.add_points(all_points)
+
+        if was_running:
+            try:
+                ok = self._start_iec_handler_sync(self.protocol_handler)
+                if not ok:
+                    reason = getattr(self.protocol_handler, "last_error", None) or "未知错误"
+                    self.log.error(f"IEC 协议处理器重初始化后启动失败: {reason}")
+            except Exception as exc:
+                self.log.error(f"IEC 协议处理器重初始化后启动异常: {exc}")
+
+    def _stop_iec_handler_sync(self, handler: ProtocolHandler) -> None:
+        """同步停止 IEC104/IEC101 handler（供从机地址热更新使用）。"""
+        import time
+
+        if isinstance(handler, IEC104ServerHandler):
+            if getattr(handler, "_connection_monitoring_supported", False):
+                handler._stop_traffic_poller()
+            handler._close_all_connections()
+            if handler._server and hasattr(handler._server, "stop"):
+                handler._server.stop()
+            handler._is_running = False
+            # 给 OS 短暂时间释放监听端口，避免立刻重绑失败
+            time.sleep(0.1)
+            return
+
+        if isinstance(handler, IEC104ClientHandler):
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(handler._stop_maintenance_task())
+            except RuntimeError:
+                pass
+            if handler._client and hasattr(handler._client, "disconnect"):
+                handler._client.disconnect()
+            elif handler._client and hasattr(handler._client, "stop"):
+                handler._client.stop()
+            handler._is_running = False
+            return
+
+        if isinstance(handler, IEC101ServerHandler):
+            if handler._server:
+                handler._server.stop()
+            handler._is_running = False
+            return
+
+        if isinstance(handler, IEC101ClientHandler):
+            handler.disconnect()
+
+    def _start_iec_handler_sync(self, handler: ProtocolHandler) -> bool:
+        """同步启动 IEC104/IEC101 handler（供从机地址热更新使用）。"""
+        import time
+
+        from src.device.protocol.endpoint_check import check_tcp_endpoint, is_tcp_port_listening
+
+        if isinstance(handler, IEC104ServerHandler):
+            if not handler._server:
+                handler._set_last_error("IEC104 服务器未初始化")
+                return False
+            listen_ip = getattr(handler._server, "ip", None) or handler._config.get("ip", "0.0.0.0")
+            listen_port = getattr(handler._server, "port", None) or handler._config.get("port", 2404)
+            reason = "端口不可用"
+            for _ in range(20):
+                ok, reason = check_tcp_endpoint(listen_ip, listen_port)
+                if ok:
+                    break
+                time.sleep(0.05)
+            else:
+                handler._set_last_error(reason)
+                return False
+
+            handler._clear_last_error()
+            handler._server.start()
+            time.sleep(0.2)
+            if not is_tcp_port_listening(listen_ip, listen_port):
+                err = f"监听 {listen_ip}:{listen_port} 失败：c104 未建立监听"
+                handler._set_last_error(err)
+                try:
+                    handler._server.stop()
+                except Exception:
+                    pass
+                handler._is_running = False
+                return False
+            handler._is_running = True
+            if getattr(handler, "_connection_monitoring_supported", False):
+                try:
+                    asyncio.get_running_loop()
+                    handler._start_traffic_poller()
+                except RuntimeError:
+                    # 同步热重载时可能没有事件循环，连接监控可延后
+                    pass
+            return True
+
+        if isinstance(handler, IEC104ClientHandler):
+            # 客户端 connect 是 async；在同步重入路径中调度到事件循环，避免死锁
+            try:
+                loop = asyncio.get_running_loop()
+
+                async def _restart_client():
+                    await handler.start()
+
+                loop.create_task(_restart_client())
+                return True
+            except RuntimeError:
+                handler._set_last_error("无可用事件循环，请手动重新启动客户端")
+                return False
+
+        if isinstance(handler, IEC101ServerHandler):
+            if not handler._server:
+                return False
+            handler._is_running = bool(handler._server.start())
+            return handler._is_running
+
+        if isinstance(handler, IEC101ClientHandler):
+            if not handler._client:
+                return False
+            handler._is_running = bool(handler._client.start())
+            return handler._is_running
+
+        return False
 
     # ===== 模拟控制（委托给 SimulationController） =====
 

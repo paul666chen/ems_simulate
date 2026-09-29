@@ -26,10 +26,17 @@ class SlaveService:
         return SlaveDao.slave_exists(channel_id, slave_id)
 
     @classmethod
-    def create_slave(cls, channel_id: int, slave_id: int, name: str | None = None) -> bool:
+    def create_slave(
+        cls,
+        channel_id: int,
+        slave_id: int,
+        name: str | None = None,
+        *,
+        max_slave_id: int = 255,
+    ) -> bool:
         """创建从机"""
-        if slave_id < 0 or slave_id > 255:
-            log.error(f"无效的从机地址: {slave_id}")
+        if slave_id < 0 or slave_id > max_slave_id:
+            log.error(f"无效的从机地址: {slave_id}（允许范围 0-{max_slave_id}）")
             return False
         return SlaveDao.create_slave(channel_id, slave_id, name)
 
@@ -39,9 +46,16 @@ class SlaveService:
         return SlaveDao.delete_slave(channel_id, slave_id)
 
     @classmethod
-    def update_slave_id(cls, channel_id: int, old_slave_id: int, new_slave_id: int) -> bool:
+    def update_slave_id(
+        cls,
+        channel_id: int,
+        old_slave_id: int,
+        new_slave_id: int,
+        *,
+        max_slave_id: int = 255,
+    ) -> bool:
         """更新从机地址"""
-        if new_slave_id < 0 or new_slave_id > 255:
-            log.error(f"无效的新从机地址: {new_slave_id}")
+        if new_slave_id < 0 or new_slave_id > max_slave_id:
+            log.error(f"无效的新从机地址: {new_slave_id}（允许范围 0-{max_slave_id}）")
             return False
         return SlaveDao.update_slave_id(channel_id, old_slave_id, new_slave_id)

@@ -13,12 +13,12 @@
       label-width="120px"
       label-position="right"
     >
-      <el-form-item :label="$t('slave.slaveAddress')" prop="slave_id">
+      <el-form-item :label="addressLabel" prop="slave_id">
         <el-input-number
           v-model="formData.slave_id"
           :min="0"
-          :max="255"
-          :placeholder="$t('slave.slaveAddressPlaceholder')"
+          :max="maxSlaveId"
+          :placeholder="addressPlaceholder"
           style="width: 100%"
         />
       </el-form-item>
@@ -46,6 +46,7 @@ import { useI18n } from "vue-i18n";
 import type { FormInstance, FormRules } from "element-plus";
 import { ElMessage } from "element-plus";
 import { addSlave } from "@/api/deviceApi";
+import { isIec60870Protocol } from "@/constants/protocol";
 
 const { t } = useI18n();
 
@@ -53,6 +54,7 @@ const props = defineProps<{
   modelValue: boolean;
   deviceName: string;
   existingSlaves: number[];
+  protocolType?: string | number;
 }>();
 
 const emit = defineEmits<{
@@ -64,6 +66,24 @@ const visible = computed({
   get: () => props.modelValue,
   set: (val) => emit("update:modelValue", val),
 });
+
+const isIecProtocol = computed(() =>
+  isIec60870Protocol(String(props.protocolType ?? "")),
+);
+
+const maxSlaveId = computed(() => (isIecProtocol.value ? 65534 : 255));
+
+const addressLabel = computed(() =>
+  isIecProtocol.value
+    ? t("slave.commonAddress")
+    : t("slave.slaveAddress"),
+);
+
+const addressPlaceholder = computed(() =>
+  isIecProtocol.value
+    ? t("slave.commonAddressPlaceholder")
+    : t("slave.slaveAddressPlaceholder"),
+);
 
 const formRef = ref<FormInstance>();
 const loading = ref(false);
@@ -80,19 +100,21 @@ const validateSlaveId = (_rule: any, value: number, callback: any) => {
   }
 };
 
-const rules: FormRules = {
+const rules = computed<FormRules>(() => ({
   slave_id: [
     { required: true, message: t("editSlave.idRequired"), trigger: "blur" },
     {
       type: "number",
       min: 0,
-      max: 255,
-      message: t("editSlave.idRange"),
+      max: maxSlaveId.value,
+      message: isIecProtocol.value
+        ? t("editSlave.idRangeIec")
+        : t("editSlave.idRange"),
       trigger: "blur",
     },
     { validator: validateSlaveId, trigger: "blur" },
   ],
-};
+}));
 
 const handleClose = () => {
   visible.value = false;
@@ -100,10 +122,10 @@ const handleClose = () => {
 };
 
 const handleSubmit = async () => {
+  if (!formRef.value) return;
   try {
-    await formRef.value?.validate();
+    await formRef.value.validate();
     loading.value = true;
-
     const success = await addSlave(props.deviceName, formData.slave_id);
     if (success) {
       ElMessage.success(t("slave.addSlaveSuccess"));
@@ -117,9 +139,3 @@ const handleSubmit = async () => {
   }
 };
 </script>
-
-<style scoped lang="scss">
-:deep(.el-dialog__body) {
-  padding-top: 20px;
-}
-</style>

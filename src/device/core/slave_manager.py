@@ -19,6 +19,10 @@ class SlaveManager:
     管理设备下属从机的增删改操作，协调内存、数据库和协议三层的一致性。
     """
 
+    # Modbus 单元标识 0-255；IEC104/101 公共地址（装置地址）为 2 字节 0-65534
+    _MODBUS_SLAVE_MAX = 255
+    _IEC_COMMON_ADDRESS_MAX = 65534
+
     def __init__(self, device: Device) -> None:
         self._device = device
 
@@ -32,11 +36,29 @@ class SlaveManager:
         """获取日志器"""
         return self._device.log
 
+    def _max_slave_id(self) -> int:
+        if self._device.protocol_type in (
+            ProtocolType.Iec104Server,
+            ProtocolType.Iec104Client,
+            ProtocolType.Iec101Server,
+            ProtocolType.Iec101Client,
+        ):
+            return self._IEC_COMMON_ADDRESS_MAX
+        return self._MODBUS_SLAVE_MAX
+
+    def _is_iec_protocol(self) -> bool:
+        return self._device.protocol_type in (
+            ProtocolType.Iec104Server,
+            ProtocolType.Iec104Client,
+            ProtocolType.Iec101Server,
+            ProtocolType.Iec101Client,
+        )
+
     def add_slave(self, slave_id: int) -> bool:
         """动态添加从机
 
         Args:
-            slave_id: 从机地址 (1-255)
+            slave_id: 从机地址 (Modbus 0-255；IEC104/101 公共地址 0-65534)
 
         Returns:
             是否添加成功
@@ -44,8 +66,9 @@ class SlaveManager:
         try:
             from src.data.service.slave_service import SlaveService
 
-            if slave_id < 0 or slave_id > 255:
-                self._log.error(f"无效的从机地址: {slave_id}")
+            max_id = self._max_slave_id()
+            if slave_id < 0 or slave_id > max_id:
+                self._log.error(f"无效的从机地址: {slave_id}（允许范围 0-{max_id}）")
                 return False
 
             if slave_id in self._pm.slave_id_list:
@@ -53,7 +76,7 @@ class SlaveManager:
                 return False
 
             # 1. 持久化到数据库
-            if not SlaveService.create_slave(self._device.device_id, slave_id):
+            if not SlaveService.create_slave(self._device.device_id, slave_id, max_slave_id=max_id):
                 self._log.error(f"保存从机到数据库失败: {slave_id}")
                 return False
 
@@ -67,6 +90,10 @@ class SlaveManager:
 
             if isinstance(server, ModbusServer):
                 server.add_slave(slave_id)
+
+            # 4. IEC104/101：重建 Station（公共地址 = 从机地址）
+            if self._is_iec_protocol():
+                self._device._reinit_protocol_for_iec104()
 
             self._log.info(f"动态添加从机成功: {slave_id}")
             return True
@@ -109,13 +136,8 @@ class SlaveManager:
             if isinstance(server, ModbusServer):
                 server.remove_slave(slave_id)
 
-            # 5. 如果是 IEC104，需要重新初始化
-            if self._device.protocol_type in [
-                ProtocolType.Iec104Server,
-                ProtocolType.Iec104Client,
-                ProtocolType.Iec101Server,
-                ProtocolType.Iec101Client,
-            ]:
+            # 5. 如果是 IEC104/101，需要重新初始化 Station
+            if self._is_iec_protocol():
                 self._device._reinit_protocol_for_iec104()
 
             self._log.info(f"动态删除从机成功: {slave_id}")
@@ -145,8 +167,9 @@ class SlaveManager:
                 self._log.warning(f"从机 {old_slave_id} 不存在")
                 return False
 
-            if new_slave_id < 0 or new_slave_id > 255:
-                self._log.error(f"无效的新从机地址: {new_slave_id}")
+            max_id = self._max_slave_id()
+            if new_slave_id < 0 or new_slave_id > max_id:
+                self._log.error(f"无效的新从机地址: {new_slave_id}（允许范围 0-{max_id}）")
                 return False
 
             if old_slave_id == new_slave_id:
@@ -159,7 +182,7 @@ class SlaveManager:
             device_id = self._device.device_id
 
             # 1. 更新数据库中的从机地址
-            if not SlaveService.update_slave_id(device_id, old_slave_id, new_slave_id):
+            if not SlaveService.update_slave_id(device_id, old_slave_id, new_slave_id, max_slave_id=max_id):
                 self._log.error(f"更新从机地址到数据库失败: {old_slave_id} -> {new_slave_id}")
                 return False
 
@@ -199,13 +222,8 @@ class SlaveManager:
                 server.add_slave(new_slave_id)
                 server.remove_slave(old_slave_id)
 
-            # 7. 协议重置 (IEC104)
-            if self._device.protocol_type in [
-                ProtocolType.Iec104Server,
-                ProtocolType.Iec104Client,
-                ProtocolType.Iec101Server,
-                ProtocolType.Iec101Client,
-            ]:
+            # 7. 协议重置 (IEC104/101：公共地址即装置地址，必须重建 Station 并恢复运行)
+            if self._is_iec_protocol():
                 self._device._reinit_protocol_for_iec104()
 
             self._log.info(f"动态编辑从机成功: {old_slave_id} -> {new_slave_id}")
@@ -248,13 +266,8 @@ class SlaveManager:
                 if slave_id in d:
                     d[slave_id] = []
 
-            # 5. IEC104 协议需要重新初始化
-            if self._device.protocol_type in [
-                ProtocolType.Iec104Server,
-                ProtocolType.Iec104Client,
-                ProtocolType.Iec101Server,
-                ProtocolType.Iec101Client,
-            ]:
+            # 5. IEC104/101 协议需要重新初始化
+            if self._is_iec_protocol():
                 self._device._reinit_protocol_for_iec104()
 
             self._log.info(f"清空从机 {slave_id} 的测点成功，共删除 {deleted_count} 个测点")
