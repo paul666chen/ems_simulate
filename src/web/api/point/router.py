@@ -27,6 +27,7 @@ from src.web.api.schemas import (
     PointsBatchCreateRequest,
     SimulateMethodSetRequest,
     SimulateRangeSetRequest,
+    SimulateSendPeriodSetRequest,
     SimulateStepSetRequest,
 )
 from src.web.log import log
@@ -156,6 +157,18 @@ async def set_point_simulation_range(req: SimulateRangeSetRequest, request: Requ
     if not success:
         raise ValidationError("设置点模拟范围失败!", data=False)
     return BaseResponse(message="设置点模拟范围成功!", data=True)
+
+
+@point_router.post("/set-send-period", response_model=BaseResponse)
+async def set_point_send_period(req: SimulateSendPeriodSetRequest, request: Request):
+    """设置单个测点的发送周期（毫秒）"""
+    device = _get_device(req.device_name, request)
+    success = await asyncio.to_thread(
+        device.setSinglePointSendPeriod, req.point_code, req.send_period_ms
+    )
+    if not success:
+        raise ValidationError("设置单点发送周期失败!", data=False)
+    return BaseResponse(message="设置单点发送周期成功!", data=True)
 
 
 @point_router.post("/edit-metadata", response_model=BaseResponse)

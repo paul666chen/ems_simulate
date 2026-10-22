@@ -78,6 +78,15 @@ class SimulateRangeSetRequest(BaseModel):
     max_value: float
 
 
+class SimulateSendPeriodSetRequest(BaseModel):
+    """设置单个测点的发送周期"""
+
+    device_name: str
+    point_code: str
+    slave_id: int | None = Field(None, description="从机 ID，不同从站编码相同时用于精确定位测点")
+    send_period_ms: int = Field(..., ge=10, le=3_600_000, description="发送周期（毫秒）")
+
+
 class PointCreateRequest(BaseModel):
     """创建测点请求"""
 

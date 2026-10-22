@@ -48,6 +48,28 @@
       <el-row>
         <el-col :span="12">
           <el-form-item
+            :label="$t('pointSimulator.sendPeriod')"
+            label-position="right"
+            class="form-item"
+          >
+            <el-input-number
+              v-model.number="simulateForm.sendPeriodMs"
+              :min="10"
+              :max="3600000"
+              :step="100"
+              :controls="false"
+              :placeholder="$t('pointSimulator.enterSendPeriod')"
+              style="width: 90%"
+            />
+          </el-form-item>
+        </el-col>
+        <el-col :span="12">
+          <div class="period-tip">{{ $t("pointSimulator.sendPeriodTip") }}</div>
+        </el-col>
+      </el-row>
+      <el-row>
+        <el-col :span="12">
+          <el-form-item
             :label="$t('pointSimulator.minValue')"
             label-position="right"
             class="form-item"
@@ -160,6 +182,7 @@ import {
   getPointInfo,
   setSinglePointSimulateMethod,
   setSinglePointStep,
+  setSinglePointSendPeriod,
   setPointSimulationRange,
 } from "@/api/pointApi";
 
@@ -193,6 +216,7 @@ const simulateForm = reactive({
   fixedValue: 0,
   minValue: 0,
   maxValue: 100,
+  sendPeriodMs: 1000, // 发送周期(毫秒)
   period: 10, // 正弦波周期(秒)
   phase: 0, // 正弦波相位(度)
   rampTime: 5, // 斜坡时间(秒)
@@ -243,6 +267,7 @@ async function loadPointInfo(silent = false) {
       simulateForm.maxValue = info.max_value || 100;
       simulateForm.simulateMethod = info.simulate_method || "Random";
       simulateForm.fixedValue = info.fixed_value ?? info.value ?? 0;
+      simulateForm.sendPeriodMs = info.send_period_ms ?? 1000;
       // 加载特殊参数
       if (info.period) simulateForm.period = info.period;
       if (info.phase) simulateForm.phase = info.phase;
@@ -298,7 +323,14 @@ const saveSettings = async () => {
       simulateForm.maxValue,
     );
 
-    if (methodResult && stepResult && rangeResult) {
+    // 保存发送周期
+    const periodResult = await setSinglePointSendPeriod(
+      props.deviceName,
+      props.pointCode,
+      simulateForm.sendPeriodMs,
+    );
+
+    if (methodResult && stepResult && rangeResult && periodResult) {
       ElMessage.success(t("pointSimulator.saved"));
       emit("update-success");
     } else {
@@ -317,6 +349,7 @@ const resetSettings = () => {
   simulateForm.fixedValue = 0;
   simulateForm.minValue = 0;
   simulateForm.maxValue = 100;
+  simulateForm.sendPeriodMs = 1000;
   simulateForm.period = 10;
   simulateForm.phase = 0;
   simulateForm.rampTime = 5;
@@ -379,5 +412,13 @@ const handleSimulateMethodChange = () => {
 
 .custom-form-item {
   margin: 0 10px;
+}
+
+.period-tip {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  font-size: 12px;
+  color: var(--text-secondary, #909399);
 }
 </style>

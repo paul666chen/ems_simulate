@@ -84,6 +84,7 @@ from .point import (
     PointsBatchCreateRequest,
     SimulateMethodSetRequest,
     SimulateRangeSetRequest,
+    SimulateSendPeriodSetRequest,
     SimulateStepSetRequest,
 )
 from .point_mapping import SourcePointItem
@@ -153,6 +154,7 @@ __all__ = [
     "SimulateMethodSetRequest",
     "SimulateStepSetRequest",
     "SimulateRangeSetRequest",
+    "SimulateSendPeriodSetRequest",
     "PointCreateRequest",
     "PointDeleteRequest",
     "PointsBatchCreateRequest",

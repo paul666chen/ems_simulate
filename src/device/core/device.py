@@ -1257,6 +1257,22 @@ class Device:
     def setSinglePointStep(self, point_code: str, step: float) -> bool:
         return self.simulation_controller.set_single_point_step(point_code, step)
 
+    def setSinglePointSendPeriod(self, point_code: str, send_period_ms: int) -> bool:
+        """设置单个点的发送周期（毫秒）"""
+        return self.simulation_controller.set_single_point_send_period(point_code, send_period_ms)
+
+    def apply_simulation_send_period(self, point, send_period_ms: int) -> bool:
+        """把模拟发送周期同步给协议层（目前 IEC104 服务端支持周期上送）。"""
+        handler = self.protocol_handler
+        setter = getattr(handler, "set_point_send_period", None)
+        if not callable(setter):
+            return False
+        try:
+            return bool(setter(point, send_period_ms))
+        except Exception as exc:
+            self.log.warning(f"测点 {getattr(point, 'code', '')} 发送周期同步协议层失败: {exc}")
+            return False
+
     def setSinglePointFixedValue(self, point_code: str, fixed_value: float | int) -> bool:
         return self.simulation_controller.set_single_point_fixed_value(point_code, fixed_value)
 
@@ -1276,6 +1292,7 @@ class Device:
                     "simulate_method": simulator.simulate_method.value,
                     "step": simulator.step,
                     "fixed_value": simulator.fixed_value,
+                    "send_period_ms": simulator.send_period_ms,
                     "enabled": simulator.is_running,
                 }
             )

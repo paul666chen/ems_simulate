@@ -20,6 +20,38 @@
       <el-tabs v-model="activeTab" class="sim-tabs">
         <!-- 页签1：测点选择 -->
         <el-tab-pane :label="t('simConfig.tabSelect')" name="select">
+          <div class="period-bar">
+            <span class="period-title">{{ t("simConfig.sendPeriod") }}</span>
+            <div class="period-item">
+              <span class="period-label">{{
+                t("simConfig.binarySendPeriod")
+              }}</span>
+              <el-input-number
+                v-model="binarySendPeriod"
+                :min="10"
+                :max="3600000"
+                :step="100"
+                :controls="false"
+                class="period-input"
+              />
+              <span class="period-unit">{{ t("simConfig.periodUnit") }}</span>
+            </div>
+            <div class="period-item">
+              <span class="period-label">{{
+                t("simConfig.analogSendPeriod")
+              }}</span>
+              <el-input-number
+                v-model="analogSendPeriod"
+                :min="10"
+                :max="3600000"
+                :step="100"
+                :controls="false"
+                class="period-input"
+              />
+              <span class="period-unit">{{ t("simConfig.periodUnit") }}</span>
+            </div>
+            <span class="period-hint">{{ t("simConfig.sendPeriodHint") }}</span>
+          </div>
           <div class="select-layout">
             <!-- 左侧测点树 -->
             <section class="left-panel">
@@ -360,6 +392,15 @@
                 }}</template>
               </el-table-column>
               <el-table-column
+                :label="t('simConfig.colSendPeriod')"
+                width="120"
+                align="center"
+              >
+                <template #default="{ row }">
+                  {{ row.send_period_ms }} {{ t("simConfig.periodUnit") }}
+                </template>
+              </el-table-column>
+              <el-table-column
                 :label="t('simConfig.colFixedValue')"
                 width="100"
                 align="center"
@@ -502,6 +543,8 @@ interface SimTreeLeaf {
   simulate_method: string;
   step: number;
   fixed_value: number;
+  /** 发送周期（毫秒） */
+  send_period_ms: number;
 }
 
 interface SimTreeGroup {
@@ -523,6 +566,49 @@ const saving = ref(false);
 const keyword = ref("");
 const selectedKeyword = ref("");
 const activeTab = ref("select");
+
+// ===== 发送周期（毫秒）=====
+const DEFAULT_SEND_PERIOD_MS = 1000;
+const MIN_SEND_PERIOD_MS = 10;
+const MAX_SEND_PERIOD_MS = 3600000;
+/** 遥信/遥测的批量发送周期：勾选新测点时按帧类型带上该值 */
+const binarySendPeriod = ref(DEFAULT_SEND_PERIOD_MS);
+const analogSendPeriod = ref(DEFAULT_SEND_PERIOD_MS);
+/** 配置回显期间抑制周期输入框的联动覆盖 */
+let syncingSendPeriod = false;
+
+function clampSendPeriod(value: number | null | undefined): number {
+  if (value === null || value === undefined || !Number.isFinite(Number(value)))
+    return DEFAULT_SEND_PERIOD_MS;
+  return Math.max(
+    MIN_SEND_PERIOD_MS,
+    Math.min(MAX_SEND_PERIOD_MS, Math.round(Number(value))),
+  );
+}
+
+/** 按帧类型取当前批量周期；遥控/遥调不在此设置范围，沿用测点自身配置 */
+function currentSendPeriod(frame: number): number | null {
+  if (frame === TYPE_FRAME.YX) return clampSendPeriod(binarySendPeriod.value);
+  if (frame === TYPE_FRAME.YC) return clampSendPeriod(analogSendPeriod.value);
+  return null;
+}
+
+/** 周期输入框变化：同步到已选中的同类型测点 */
+function applyPeriodToSelected(frame: number, value: number): void {
+  if (syncingSendPeriod) return;
+  const period = clampSendPeriod(value);
+  for (const leaf of selectedLeaves.value) {
+    if (leaf.frame_type === frame) leaf.send_period_ms = period;
+  }
+}
+
+watch(binarySendPeriod, (v) => applyPeriodToSelected(TYPE_FRAME.YX, v), {
+  flush: "sync",
+});
+watch(analogSendPeriod, (v) => applyPeriodToSelected(TYPE_FRAME.YC, v), {
+  flush: "sync",
+});
+
 /** 树数据：shallowRef 避免对 ~2 万个测点做深层响应式代理（61850 同款优化） */
 const treeData = shallowRef<SimTreeGroup[]>([]);
 const selectedLeaves = ref<SimTreeLeaf[]>([]);
@@ -596,6 +682,7 @@ function collectCurrentConfig(): SimulationConfigItem[] {
         simulate_method: leaf.simulate_method,
         step: leaf.step,
         fixed_value: leaf.fixed_value,
+        send_period_ms: clampSendPeriod(leaf.send_period_ms),
       });
     }
   });
@@ -817,6 +904,7 @@ function createLeaf(leaf: PointLeaf, frame: number): SimTreeLeaf {
     simulate_method: "Random",
     step: 1,
     fixed_value: Number.isFinite(currentValue) ? currentValue : 0,
+    send_period_ms: DEFAULT_SEND_PERIOD_MS,
   };
 }
 
@@ -1056,6 +1144,8 @@ function setLeafSelected(leaf: SimTreeLeaf, selected: boolean): void {
   if (selected) {
     selectedCodes.add(code);
     leaf.enabled = true;
+    const period = currentSendPeriod(leaf.frame_type);
+    if (period !== null) leaf.send_period_ms = period;
     selectedLeaves.value.push(leaf);
     for (const gid of ancestorsById.get(code) ?? []) {
       groupSelCount[gid] = (groupSelCount[gid] ?? 0) + 1;
@@ -1079,6 +1169,8 @@ function setGroupSelected(group: SimTreeGroup, selected: boolean): void {
       if (!selectedCodes.has(leaf.point_code)) {
         selectedCodes.add(leaf.point_code);
         leaf.enabled = true;
+        const period = currentSendPeriod(leaf.frame_type);
+        if (period !== null) leaf.send_period_ms = period;
         selectedLeaves.value.push(leaf);
       }
     });
@@ -1155,15 +1247,31 @@ function removeSelected(leaf: SimTreeLeaf): void {
 
 function mergeConfig(configs: SimulationConfigItem[]): void {
   const enabledCodes = new Set<string>();
+  let binaryPeriod: number | null = null;
+  let analogPeriod: number | null = null;
+  syncingSendPeriod = true;
   for (const cfg of configs) {
     const leaf = leafIndex.get(cfg.point_code);
     if (!leaf) continue;
     leaf.simulate_method = cfg.simulate_method ?? leaf.simulate_method;
     leaf.step = cfg.step ?? leaf.step;
     leaf.fixed_value = cfg.fixed_value ?? leaf.fixed_value;
+    if (cfg.send_period_ms != null) {
+      leaf.send_period_ms = clampSendPeriod(cfg.send_period_ms);
+    }
+    // 周期输入框回显：取该帧类型首个已配置测点的周期
+    if (leaf.frame_type === TYPE_FRAME.YX && binaryPeriod === null) {
+      binaryPeriod = leaf.send_period_ms;
+    }
+    if (leaf.frame_type === TYPE_FRAME.YC && analogPeriod === null) {
+      analogPeriod = leaf.send_period_ms;
+    }
     leaf.enabled = cfg.enabled ?? true;
     if (leaf.enabled) enabledCodes.add(cfg.point_code);
   }
+  binarySendPeriod.value = binaryPeriod ?? DEFAULT_SEND_PERIOD_MS;
+  analogSendPeriod.value = analogPeriod ?? DEFAULT_SEND_PERIOD_MS;
+  syncingSendPeriod = false;
   selectCodesInOrder(enabledCodes);
 }
 
@@ -1272,10 +1380,47 @@ onBeforeUnmount(() => {
 }
 
 /* ===== 页签1：测点选择 ===== */
+.period-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-bottom: 10px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: var(--border-radius-base, 12px);
+  background: var(--table-header-bg, #f5f7fa);
+  font-size: 13px;
+}
+.period-title {
+  font-weight: 600;
+  color: var(--text-primary, #1f2937);
+  white-space: nowrap;
+}
+.period-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.period-label {
+  color: var(--text-secondary, #606266);
+  white-space: nowrap;
+}
+.period-input {
+  width: 110px;
+}
+.period-unit {
+  color: var(--text-secondary, #909399);
+}
+.period-hint {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-secondary, #909399);
+}
 .select-layout {
   display: flex;
   gap: 10px;
-  height: 640px;
+  height: 596px;
 }
 
 .left-panel {

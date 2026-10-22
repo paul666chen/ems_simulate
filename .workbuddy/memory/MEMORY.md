@@ -13,6 +13,11 @@
 - 需要模拟"多设备多 IP"：优先用具体 IP + 同端口（已支持）；不同端口方式依然可用。
 - GOOSE 发布/订阅/抓包是唯一按物理网卡选择的功能（需 Npcap）。
 
+## 模拟模块（重要架构事实）
+- 模拟内核：`src/device/simulator/`（`SimulationController` 单线程调度 + `PointSimulator` 波形生成）。模拟配置（方式/步长/定值/发送周期）**只存内存**，设备重建走 snapshot/restore 保留，后端重启丢失。
+- 测点级 `send_period_ms`（2026-10-22 新增，10–3,600,000ms，默认 1000）：模拟线程按点独立调度（`next_due`），并联动 IEC104 服务端 c104 点位 `report_ms`（handler 内 `_send_periods` 缓存，建点时生效）。
+- 模拟只在服务端设备有效；客户端设备不参与。
+
 ## Windows 打包（exe）流程
 - 官方脚本 `scripts/build_windows.ps1`：版本同步 → `npm run build:fast`（front → www/）→ PyInstaller onedir（`ems_simulate_backend.spec`，env: EMS_PYINSTALLER_MODE=onedir/NAME=ems_simulate/CONSOLE=1）→ 组装 `build/windows/ems-simulate/` + `build/ems-simulate_windows_X.Y.Z.zip`。
 - 构建依赖：`uv sync --extra dev --extra build`（pyinstaller+altgraph+pillow，走 7892 代理）。

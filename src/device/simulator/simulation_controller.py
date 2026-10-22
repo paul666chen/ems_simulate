@@ -1,4 +1,5 @@
 import threading
+import time
 
 from src.device.simulator.log import log
 from src.device.simulator.point_simulator import PointSimulator
@@ -7,6 +8,11 @@ from src.enums.points.change_tracker import ChangeSource, track_change
 
 
 class SimulationController:
+    # 调度循环的最小等待粒度（秒），避免高频率发送周期空转
+    MIN_TICK_SECONDS = 0.005
+    # 单次等待上限（秒）：保持原有的 1 秒巡检节奏
+    MAX_TICK_SECONDS = 1.0
+
     def __init__(self, device):
         self.points: dict[Yc | Yx, PointSimulator] = {}
         self.device = device
@@ -15,7 +21,15 @@ class SimulationController:
         # IEC61850 重建设备时模型尚未加载，按测点身份暂存待恢复的设置。
         self._pending_configuration: dict[tuple, dict] = {}
 
-    def add_point(self, point: Yc | Yx, simulate_method: SimulateMethod, step: float, *, is_running: bool = False):
+    def add_point(
+        self,
+        point: Yc | Yx,
+        simulate_method: SimulateMethod,
+        step: float,
+        *,
+        is_running: bool = False,
+        send_period_ms: int | None = None,
+    ):
         # IEC61850 标准元数据 DA（品质 q、时标 t、描述 dU）不参与模拟
         from src.enums.modbus_def import ProtocolType
 
@@ -25,8 +39,23 @@ class SimulationController:
                 return
         simulator = PointSimulator(point, simulate_method, step)
         simulator.is_running = is_running
+        if send_period_ms is not None:
+            simulator.send_period_ms = self.normalize_send_period(send_period_ms)
         self.points[point] = simulator
         self._restore_point_configuration(point, simulator)
+
+    @staticmethod
+    def normalize_send_period(send_period_ms: int | float | None) -> int:
+        """规整发送周期（毫秒）：空值/非法值回退默认值，并夹取到允许范围。"""
+        if send_period_ms is None:
+            return PointSimulator.DEFAULT_SEND_PERIOD_MS
+        try:
+            value = int(send_period_ms)
+        except (TypeError, ValueError):
+            return PointSimulator.DEFAULT_SEND_PERIOD_MS
+        if value <= 0:
+            return PointSimulator.DEFAULT_SEND_PERIOD_MS
+        return max(PointSimulator.MIN_SEND_PERIOD_MS, min(PointSimulator.MAX_SEND_PERIOD_MS, value))
 
     @staticmethod
     def _configuration_key(point) -> tuple:
@@ -38,7 +67,16 @@ class SimulationController:
         for point, simulator in tuple(self.points.items()):
             config = {
                 field: getattr(simulator, field)
-                for field in ("simulate_method", "step", "fixed_value", "is_running", "cycle", "phase", "ramp_time")
+                for field in (
+                    "simulate_method",
+                    "step",
+                    "fixed_value",
+                    "is_running",
+                    "cycle",
+                    "phase",
+                    "ramp_time",
+                    "send_period_ms",
+                )
             }
             if isinstance(point, (Yc, Yt)):
                 config["min_value_limit"] = point.min_value_limit
@@ -98,12 +136,35 @@ class SimulationController:
                     simulator.step = float(item["step"])
                 if item.get("fixed_value") is not None:
                     simulator.fixed_value = float(item["fixed_value"])
+                if item.get("send_period_ms") is not None:
+                    self._apply_send_period(point, simulator, item["send_period_ms"])
                 if item.get("enabled") is not None:
                     simulator.is_running = bool(item["enabled"])
                 applied.append(point_code)
             except (ValueError, TypeError) as exc:
                 failed.append({"point_code": point_code, "reason": str(exc)})
         return applied, failed
+
+    def _apply_send_period(self, point: Yc | Yx, simulator: PointSimulator, send_period_ms: int | float) -> None:
+        """写入发送周期：重置调度时间，并同步给支持周期上送的协议层。"""
+        simulator.send_period_ms = self.normalize_send_period(send_period_ms)
+        simulator.next_due = 0.0
+        sync = getattr(self.device, "apply_simulation_send_period", None)
+        if callable(sync):
+            try:
+                sync(point, simulator.send_period_ms)
+            except Exception as exc:  # 协议层不支持时不影响模拟配置生效
+                log.warning(f"同步测点 {point.code} 发送周期到协议层失败: {exc}")
+
+    def set_single_point_send_period(self, point_code: str, send_period_ms: int | float) -> bool:
+        """设置单个点的发送周期（毫秒）"""
+        for point, simulator in self.points.items():
+            if point.code == point_code:
+                self._apply_send_period(point, simulator, send_period_ms)
+                log.info(f"设置点 {point_code} 的发送周期为 {simulator.send_period_ms} ms")
+                return True
+        log.error(f"未找到点 {point_code}")
+        return False
 
     def set_point_status(self, point: Yc | Yx, is_running: bool):
         if point in self.points:
@@ -164,6 +225,7 @@ class SimulationController:
                     "simulate_method": simulator.simulate_method.value,
                     "step": simulator.step,
                     "fixed_value": simulator.fixed_value,
+                    "send_period_ms": simulator.send_period_ms,
                     "is_running": simulator.is_running,
                     "frame_type": point.frame_type,
                     "iec_type_id": getattr(point, "iec_type_id", None),
@@ -230,28 +292,41 @@ class SimulationController:
             batch_writer = getattr(self.device.protocol_handler, "write_values_batch", None)
             batch_values = [] if callable(batch_writer) else None
 
+            now = time.monotonic()
+            next_due = now + self.MAX_TICK_SECONDS
+
             # 配置接口可能同时增删模拟点，使用快照避免迭代期间字典变化。
             for point_simulator in tuple(self.points.values()):
-                if point_simulator.is_running and not self._stop_event.is_set():
-                    point = point_simulator.point
+                if not point_simulator.is_running or self._stop_event.is_set():
+                    continue
+                # 发送周期：每个测点独立调度，未到期的点本轮跳过
+                due = getattr(point_simulator, "next_due", 0.0)
+                if now < due:
+                    next_due = min(next_due, due)
+                    continue
+                point = point_simulator.point
 
-                    # 性能优化：仅当开启追溯时才进入上下文
-                    if point.change_tracking_enabled:
-                        with track_change(ChangeSource.SIMULATION, f"自动模拟 {point.code}", local_addr):
-                            changed = self._perform_point_simulation(
-                                point_simulator,
-                                write_protocol=batch_values is None,
-                            )
-                    else:
+                # 性能优化：仅当开启追溯时才进入上下文
+                if point.change_tracking_enabled:
+                    with track_change(ChangeSource.SIMULATION, f"自动模拟 {point.code}", local_addr):
                         changed = self._perform_point_simulation(
                             point_simulator,
                             write_protocol=batch_values is None,
                         )
+                else:
+                    changed = self._perform_point_simulation(
+                        point_simulator,
+                        write_protocol=batch_values is None,
+                    )
 
-                    if batch_values is not None and changed:
-                        # 与 PointOperator.edit_value 保持一致：协议层接收编码后
-                        # 的 point.value，而变化判断仍使用 Yc.real_value。
-                        batch_values.append((point, point.value))
+                period_ms = getattr(point_simulator, "send_period_ms", PointSimulator.DEFAULT_SEND_PERIOD_MS)
+                point_simulator.next_due = now + max(period_ms, PointSimulator.MIN_SEND_PERIOD_MS) / 1000.0
+                next_due = min(next_due, point_simulator.next_due)
+
+                if batch_values is not None and changed:
+                    # 与 PointOperator.edit_value 保持一致：协议层接收编码后
+                    # 的 point.value，而变化判断仍使用 Yc.real_value。
+                    batch_values.append((point, point.value))
 
             if batch_values:
                 try:
@@ -260,7 +335,11 @@ class SimulationController:
                 except Exception as e:
                     log.error(f"IEC61850 模拟值批量写入异常: count={len(batch_values)}, error={e}")
 
-            self._stop_event.wait(1)  # 可被 stop 立即唤醒
+            wait_seconds = max(
+                self.MIN_TICK_SECONDS,
+                min(next_due - time.monotonic(), self.MAX_TICK_SECONDS),
+            )
+            self._stop_event.wait(wait_seconds)  # 可被 stop 立即唤醒
 
     def _perform_point_simulation(self, point_simulator: PointSimulator, *, write_protocol: bool = True) -> bool:
         """执行单个点的模拟逻辑"""

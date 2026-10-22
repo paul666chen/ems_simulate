@@ -112,6 +112,7 @@ export const POINT_API = {
   SET_SIMULATE_METHOD: "/api/points/set-simulate-method",
   SET_SIMULATE_STEP: "/api/points/set-simulate-step",
   SET_SIMULATION_RANGE: "/api/points/set-simulation-range",
+  SET_SEND_PERIOD: "/api/points/set-send-period",
   EDIT_METADATA: "/api/points/edit-metadata",
   EDIT_IEC104_METADATA: "/api/points/edit-iec104-metadata",
   READ_SINGLE: "/api/points/read-single",

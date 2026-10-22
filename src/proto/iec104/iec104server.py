@@ -305,6 +305,28 @@ class IEC104Server:
             log.info(f"设置监控点值失败: {e}")
             raise e
 
+    def set_point_report_period(self, io_address: int, report_ms: int, common_address: int = 1) -> bool:
+        """
+        设置指定站中指定IOA监控点的自动上报间隔（周期上送）
+
+        :param io_address: 信息对象地址(IOA)
+        :param report_ms: 自动上报间隔（毫秒），0 表示仅变化时上送
+        :param common_address: 站地址（对应从站 slave_id）
+        :return: 是否设置成功
+        """
+        station = self.stations.get(common_address)
+        if not station:
+            return False
+        try:
+            point = station.get_point(io_address=io_address)
+            if point is None:
+                return False
+            point.report_ms = max(0, int(report_ms))
+            return True
+        except Exception as e:
+            log.info(f"设置监控点上报周期失败: IOA={io_address}, report_ms={report_ms}, error={e}")
+            return False
+
     def set_point_quality(self, io_address: int, quality: int, frame_type: int = 0, common_address: int = 1) -> None:
         """
         设置指定站中指定IOA的品质描述符

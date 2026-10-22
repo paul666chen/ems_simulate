@@ -94,6 +94,8 @@ export interface SimulationConfigItem {
   simulate_method: string;
   step: number;
   fixed_value: number;
+  /** 发送周期（毫秒），遥信/遥测按各自周期更新并上送 */
+  send_period_ms?: number;
   enabled: boolean;
 }
 
@@ -121,7 +123,12 @@ export async function applySimulationConfig(
   deviceName: string,
   points: Pick<
     SimulationConfigItem,
-    "point_code" | "enabled" | "simulate_method" | "step" | "fixed_value"
+    | "point_code"
+    | "enabled"
+    | "simulate_method"
+    | "step"
+    | "fixed_value"
+    | "send_period_ms"
   >[],
 ): Promise<SimulationConfigApplyResult> {
   try {

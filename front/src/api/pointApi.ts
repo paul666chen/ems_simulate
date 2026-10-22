@@ -198,12 +198,28 @@ export async function setPointSimulationRange(
   }
 }
 
+export async function setSinglePointSendPeriod(
+  deviceName: string,
+  pointCode: string,
+  sendPeriodMs: number,
+): Promise<boolean> {
+  try {
+    return await requestApi(POINT_API.SET_SEND_PERIOD, "post", {
+      device_name: deviceName,
+      point_code: pointCode,
+      send_period_ms: sendPeriodMs,
+    });
+  } catch (error) {
+    console.error("Error setting single point send period:", error);
+    throw error;
+  }
+}
+
 export async function editPointMetadata(
   deviceName: string,
   pointCode: string,
   metadata: any,
-): Promise<boolean> {
-  try {
+): Promise<boolean> {  try {
     return await requestApi(POINT_API.EDIT_METADATA, "post", {
       device_name: deviceName,
       point_code: pointCode,

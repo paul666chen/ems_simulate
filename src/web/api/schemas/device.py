@@ -81,6 +81,9 @@ class SimulationConfigItem(BaseModel):
     simulate_method: SimulateMethod | None = Field(None, description="模拟方式")
     step: float | None = Field(None, gt=0, description="模拟步长，支持浮点数")
     fixed_value: float | int | None = Field(None, description="定值模拟的目标值")
+    send_period_ms: int | None = Field(
+        None, ge=10, le=3_600_000, description="发送周期（毫秒），控制该测点值更新/上送的节奏"
+    )
 
 
 class ApplySimulationConfigRequest(BaseModel):

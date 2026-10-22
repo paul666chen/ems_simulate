@@ -64,6 +64,25 @@ class IEC104ServerHandler(ServerHandler):
         # 连接级实时流量：key -> (rx_bytes, tx_bytes, rx_frames, tx_frames) 上次快照
         self._traffic_snapshot: dict[str, tuple[int, int, int, int]] = {}
         self._traffic_task = None
+        # 测点发送周期（毫秒）：按测点编码缓存，建点前配置也能在 add_points 时生效
+        self._send_periods: dict[str, int] = {}
+
+    def set_point_send_period(self, point: BasePoint, send_period_ms: int) -> bool:
+        """设置测点在 IEC104 服务端的自动上报间隔（周期上送）。"""
+        try:
+            period = max(0, int(send_period_ms))
+        except (TypeError, ValueError):
+            return False
+        self._send_periods[point.code] = period
+        if self._server is None:
+            # 设备尚未启动：周期已缓存，add_points 建点时使用
+            return False
+        common_address = int(point.rtu_addr) if point.rtu_addr else 1
+        return self._server.set_point_report_period(
+            io_address=int(point.address),
+            report_ms=period,
+            common_address=common_address,
+        )
 
     def initialize(self, config: dict[str, Any]) -> None:
         """初始化 IEC104 服务器
@@ -383,7 +402,7 @@ class IEC104ServerHandler(ServerHandler):
                 self._server.add_monitoring_point(
                     io_address=point.address,
                     point_type=point_type,
-                    report_ms=1000,  # 自动上报间隔 1 秒
+                    report_ms=self._send_periods.get(point.code, 1000),  # 自动上报间隔
                     common_address=common_address,
                 )
             elif frame_type in (2, 3):  # 遥控/遥调 → 命令点

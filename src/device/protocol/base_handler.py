@@ -142,6 +142,20 @@ class ProtocolHandler(ABC):
         """
         pass
 
+    def set_point_send_period(self, point: BasePoint, send_period_ms: int) -> bool:
+        """设置测点在协议层的周期发送间隔（毫秒）。
+
+        默认协议不支持周期上送，由具体实现覆盖（如 IEC104 服务端的自动上报间隔）。
+
+        Args:
+            point: 测点对象
+            send_period_ms: 发送周期（毫秒）
+
+        Returns:
+            bool: 协议层是否已应用该周期
+        """
+        return False
+
     def set_config(self, key: str, value: Any) -> None:
         """设置配置项"""
         self._config[key] = value

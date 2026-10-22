@@ -16,6 +16,7 @@ import {
   getPointInfo,
   setSinglePointSimulateMethod,
   setSinglePointStep,
+  setSinglePointSendPeriod,
   setPointSimulationRange,
 } from "@/api/pointApi";
 import { getPointTree } from "@/api/pointTreeApi";
@@ -38,6 +39,7 @@ jest.mock("@/api/pointApi", () => ({
   getPointInfo: jest.fn(),
   setSinglePointSimulateMethod: jest.fn(),
   setSinglePointStep: jest.fn(),
+  setSinglePointSendPeriod: jest.fn(),
   setPointSimulationRange: jest.fn(),
   batchPointValues: jest.fn(),
 }));
@@ -147,6 +149,7 @@ describe("simulation settings synchronization", () => {
         return true;
       });
     jest.mocked(setPointSimulationRange).mockResolvedValue(true);
+    jest.mocked(setSinglePointSendPeriod).mockResolvedValue(true);
     jest
       .mocked(applySimulationConfig)
       .mockImplementation(async (_device, items) => {
@@ -198,8 +201,27 @@ describe("simulation settings synchronization", () => {
     expect(settings.selectedLeaves.value[0].simulate_method).toBe("FixedValue");
   });
 
-  it("saves immediately and refreshes an already expanded table panel", async () => {
+  it("applies the analog send period to selected points and saves it", async () => {
+    const settings = dialog();
+    await settings.handleOpen();
+    settings.analogSendPeriod.value = 5000;
+    expect(settings.selectedLeaves.value[0].send_period_ms).toBe(5000);
+    await settings.handleSave();
+    expect(applySimulationConfig).toHaveBeenLastCalledWith("device", [
+      expect.objectContaining({ point_code: "P1", send_period_ms: 5000 }),
+    ]);
+  });
+
+  it("loads and saves the single point send period", async () => {
     const table = point();
+    await nextTick();
+    expect(table.simulateForm.sendPeriodMs).toBe(1000);
+    table.simulateForm.sendPeriodMs = 3000;
+    await table.saveSettings();
+    expect(setSinglePointSendPeriod).toHaveBeenCalledWith("device", "P1", 3000);
+  });
+
+  it("saves immediately and refreshes an already expanded table panel", async () => {    const table = point();
     const settings = dialog();
     await settings.handleOpen();
     Object.assign(settings.selectedLeaves.value[0], {

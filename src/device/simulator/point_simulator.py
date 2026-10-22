@@ -6,6 +6,11 @@ from src.enums.point_data import SimulateMethod, Yc, Yt, Yx
 
 
 class PointSimulator:
+    # 发送周期（毫秒）默认值与允许范围：周期决定该测点值更新/下发的节奏
+    DEFAULT_SEND_PERIOD_MS = 1000
+    MIN_SEND_PERIOD_MS = 10
+    MAX_SEND_PERIOD_MS = 3_600_000
+
     def __init__(self, point, method, step):
         self.point: Yc | Yt | Yx = point
         self.simulate_method = method
@@ -19,6 +24,9 @@ class PointSimulator:
         self.ramp_time = 5  # 斜坡时间（秒），用于斜坡模拟
         self.target_value = self.last_value
         self.ramp_start_time = 0
+        # 发送周期（毫秒）与下次到期时间（monotonic 秒）；0 表示立即执行
+        self.send_period_ms = self.DEFAULT_SEND_PERIOD_MS
+        self.next_due = 0.0
 
     def simulate(self):
         """模拟测点值变化"""
