@@ -48,6 +48,9 @@ class Config:
     web_host: str = "127.0.0.1"  # 服务监听地址，默认仅本机访问
     web_port: int = 8991
 
+    # 报文落盘日志：IEC104 收发帧写入 log/iec104_message.log
+    message_log_iec104: bool = True
+
     @classmethod
     def load_config(cls, config_file: str) -> None:
         """加载配置文件并更新配置类属性
@@ -82,6 +85,15 @@ class Config:
                 if "server" in config:
                     cls.web_host = config["server"].get("host", cls.web_host)
                     cls.web_port = int(config["server"].get("port", cls.web_port))
+
+                # 报文落盘日志配置
+                if "log" in config and "iec104_message" in config["log"]:
+                    cls.message_log_iec104 = config["log"]["iec104_message"].strip().lower() not in (
+                        "0",
+                        "off",
+                        "false",
+                        "no",
+                    )
             else:
                 print(f"Warning: Config file {config_file} not found, using defaults")
         except Exception as e:

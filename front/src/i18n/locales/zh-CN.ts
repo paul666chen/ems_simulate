@@ -1719,6 +1719,11 @@ export default {
     giIntervalTip: "总召唤命令的执行间隔",
     counterInterrogationInterval: "累计量召唤命令间隔",
     zeroMeansUnlimited: "0 表示不限制连接数",
+    commandMode: "遥控命令传输模式",
+    commandModeTip:
+      "必须与主站流程一致：主站只发执行令选“直接执行”；主站先发选择令再发执行令选“选择后执行”，否则遥控会被否定确认（COT=0x47）",
+    commandModeDirect: "直接执行（DIRECT）",
+    commandModeSelectAndExecute: "选择后执行（SELECT_AND_EXECUTE）",
     mmsCaptureEnabled: "MMS 报文抓包",
     mmsCaptureTip: "开启后使用 Npcap/libpcap 抓取 MMS 报文，需安装 Npcap",
     modelDiscoveryTimeout: "模型发现超时",

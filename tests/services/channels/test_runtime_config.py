@@ -474,3 +474,29 @@ def test_identity_certificate_is_rejected_as_ca_certificate():
     certificate, _ = _certificate_and_key("identity")
     with pytest.raises(ValidationError, match="Basic Constraints"):
         _validate_ca_certificate(certificate)
+
+
+def test_iec104_server_command_mode_default_is_direct():
+    values = get_protocol_param_defaults(2, 2)
+    assert values["command_mode"] == "direct"
+
+
+def test_iec104_server_accepts_select_and_execute_command_mode():
+    normalized = normalize_protocol_params(
+        2, 2, {**get_protocol_param_defaults(2, 2), "command_mode": "SELECT_AND_EXECUTE"}
+    )
+    assert normalized["command_mode"] == "select_and_execute"
+
+
+def test_iec104_server_rejects_unknown_command_mode():
+    with pytest.raises(ValueError, match="command_mode"):
+        normalize_protocol_params(
+            2, 2, {**get_protocol_param_defaults(2, 2), "command_mode": "auto_detect"}
+        )
+
+
+def test_command_mode_is_rejected_for_iec104_client():
+    with pytest.raises(ValueError, match="command_mode"):
+        normalize_protocol_params(
+            2, 1, {**get_protocol_param_defaults(2, 1), "command_mode": "direct"}
+        )

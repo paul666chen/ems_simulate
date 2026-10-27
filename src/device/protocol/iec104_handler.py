@@ -24,6 +24,7 @@ from src.enums.points.iec104_quality import (
     supports_quality,
 )
 from src.enums.points.iec104_type import encode_iec104_value
+from src.proto.iec104.iec104server import IEC104_COMMAND_MODE_DIRECT
 
 
 def _resolve_c104_type(point: BasePoint) -> c104.Type:
@@ -41,6 +42,14 @@ def _resolve_c104_type(point: BasePoint) -> c104.Type:
 
 
 _decode_c104_point_value = decode_point_value
+
+
+def _build_message_log_label(config: dict[str, Any], ip: str, port: int, server: bool) -> str:
+    """构造报文文件日志的设备标签，如 ``pcs 客户端→192.168.3.24:2404``。"""
+    role = "服务端" if server else "客户端→"
+    device_name = str(config.get("device_name") or "").strip()
+    endpoint = f"{ip}:{port}"
+    return f"{device_name} {role}{endpoint}" if device_name else f"{role}{endpoint}"
 
 
 def _c104_connection_time_utc(value: datetime | None) -> datetime | None:
@@ -106,6 +115,7 @@ class IEC104ServerHandler(ServerHandler):
         self._server: IEC104Server = IEC104Server(
             ip=ip,
             port=port,
+            message_log_label=_build_message_log_label(config, ip, port, server=True),
             connection_timeout=runtime.get("t0_timeout_s", 10),
             message_timeout=runtime.get("t1_timeout_s", 15),
             confirm_interval=runtime.get("t2_timeout_s", 10),
@@ -116,6 +126,7 @@ class IEC104ServerHandler(ServerHandler):
             transport_security=build_transport_security(security),
             one_way_tls_config=load_one_way_tls_config(security, client=False),
             connection_history_size=100,
+            command_mode=runtime.get("command_mode", IEC104_COMMAND_MODE_DIRECT),
         )
         self._server.set_connection_state_callback(self._on_connection_state_change)
 
@@ -542,6 +553,7 @@ class IEC104ClientHandler(ClientHandler):
         self._client = IEC104Client(
             ip=ip,
             port=port,
+            message_log_label=_build_message_log_label(config, ip, port, server=False),
             originator_address=runtime.get("originator_address", 0),
             connection_timeout=runtime.get("t0_timeout_s", 10),
             message_timeout=runtime.get("t1_timeout_s", 15),

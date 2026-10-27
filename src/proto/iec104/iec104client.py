@@ -14,6 +14,7 @@ import c104
 
 from src.device.core.message.message_capture import MessageCapture
 from src.proto.iec104.log import log
+from src.proto.iec104.message_log import log_frame
 from src.proto.iec104.tls import IEC104OneWayTlsConfig, TlsClientBridge
 
 
@@ -32,14 +33,17 @@ class IEC104Client:
         general_interrogation_on_connect: bool = True,
         transport_security: c104.TransportSecurity | None = None,
         one_way_tls_config: IEC104OneWayTlsConfig | None = None,
+        message_log_label: str = "",
     ):
         """
         初始化IEC 104客户端
         :param ip: 服务器IP地址，默认127.0.0.1
         :param port: 服务器端口，默认2404
+        :param message_log_label: 报文文件日志中的设备/端点标签
         """
         self.ip = ip
         self.port = port
+        self.message_log_label = message_log_label or f"客户端→{ip}:{port}"
         self._tls_bridge = (
             TlsClientBridge(ip, port, one_way_tls_config.create_client_context()) if one_way_tls_config else None
         )
@@ -112,6 +116,7 @@ class IEC104Client:
             self.message_capture.add_rx(data)
         except Exception as e:
             log.error(f"记录接收报文失败: {e}")
+        log_frame("RX", data, self.message_log_label)
 
     def _on_send_raw(self, connection: c104.Connection, data: bytes) -> None:
         """发送原始报文回调"""
@@ -119,6 +124,7 @@ class IEC104Client:
             self.message_capture.add_tx(data)
         except Exception as e:
             log.error(f"记录发送报文失败: {e}")
+        log_frame("TX", data, self.message_log_label)
 
     def get_captured_messages(self, limit: int = 100) -> list[dict[str, Any]]:
         """获取捕获的报文列表"""

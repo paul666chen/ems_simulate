@@ -1762,6 +1762,11 @@ export default {
     giIntervalTip: "Interval between general interrogation commands",
     counterInterrogationInterval: "Counter Interrogation Interval",
     zeroMeansUnlimited: "0 means unlimited connections",
+    commandMode: "Command Transmission Mode",
+    commandModeTip:
+      "Must match the master station: choose Direct if the master only sends execute, Select & Execute if it sends select first. Mismatch results in negative activation confirmation (COT=0x47)",
+    commandModeDirect: "Direct (DIRECT)",
+    commandModeSelectAndExecute: "Select & Execute (SELECT_AND_EXECUTE)",
     mmsCaptureEnabled: "MMS Packet Capture",
     mmsCaptureTip:
       "Capture MMS packets with Npcap/libpcap when enabled. Npcap must be installed.",

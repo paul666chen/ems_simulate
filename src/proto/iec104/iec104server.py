@@ -13,6 +13,7 @@ from c104 import Quality
 
 from src.device.core.message.message_capture import MessageCapture
 from src.proto.iec104.log import log
+from src.proto.iec104.message_log import log_frame
 from src.proto.iec104.tls import IEC104OneWayTlsConfig, TlsServerBridge, allocate_loopback_port
 
 ServerConnection = getattr(c104, "ServerConnection", Any)
@@ -22,6 +23,68 @@ ServerConnectionState = getattr(c104, "ServerConnectionState", Any)
 def _has_connection_monitoring_extension() -> bool:
     """Return whether c104 exposes the EMS fork's connection lifecycle API."""
     return hasattr(c104, "ServerConnection") and hasattr(c104, "ServerConnectionState")
+
+
+# ---------------------------------------------------------------------------
+# 遥控命令模式（命令传输模式）
+#
+# c104（lib60870）对命令点有两种互斥的传输模式，主站与从站必须一致，否则从站一律回
+# 否定激活确认（COT=0x47）：
+#   * DIRECT            直接执行：主站只发执行令（SE=0）；主站若发选择令（SE=1）→ 回 0x47
+#   * SELECT_AND_EXECUTE 选择后执行：主站必须先发选择令（SE=1）再发执行令（SE=0）；
+#                        未选择直接执行 → 回 0x47
+#
+# 两者互斥，且与主站流程必须一致，因此作为设备运行参数由使用者显式选择；
+# 模式不匹配时服务端会在日志中给出诊断提示（见 _diagnose_command_mode）。
+# ---------------------------------------------------------------------------
+IEC104_COMMAND_MODE_DIRECT = "direct"
+IEC104_COMMAND_MODE_SELECT_AND_EXECUTE = "select_and_execute"
+IEC104_COMMAND_MODES = (IEC104_COMMAND_MODE_DIRECT, IEC104_COMMAND_MODE_SELECT_AND_EXECUTE)
+
+# 带“选择/执行”语义（信息体末字节 bit7 = SE）的命令 ASDU 类型
+# C_SC_NA_1 / C_DC_NA_1 / C_RC_TA_1 / C_SE_NA_1 / C_SE_NB_1 / C_SE_NC_1
+_SELECTABLE_COMMAND_TYPE_IDS = frozenset({45, 46, 47, 48, 49, 50})
+_COT_ACTIVATION = 6
+
+
+def normalize_command_mode(value: str | None, default: str = IEC104_COMMAND_MODE_DIRECT) -> str:
+    """规范化命令传输模式配置值，非法值回退到 default。"""
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in IEC104_COMMAND_MODES:
+            return candidate
+    return default
+
+
+def parse_select_command(data: bytes) -> tuple[int, int] | None:
+    """从接收到的 I 帧中识别“选择(SELECT)命令”，返回 (公共地址, 信息体地址)。
+
+    Args:
+        data: 完整的 APDU 字节（可含多帧，仅解析首帧）
+
+    Returns:
+        命中选择命令时返回 ``(common_address, ioa)``，否则返回 None。
+    """
+    # APCI: 0x68 + 长度 + 4 字节控制域；I 帧要求控制域最低位为 0
+    # 最短命令帧 = 6(APCI) + 类型(1) + VSQ(1) + COT(2) + CA(2) + IOA(3) + 命令限定词(1) = 16
+    if len(data) < 16 or data[0] != 0x68:
+        return None
+    apdu_length = data[1]
+    if apdu_length + 2 > len(data):
+        return None
+    if data[2] & 0x01:  # 非 I 帧（S/U 帧）
+        return None
+    type_id = data[6]
+    if type_id not in _SELECTABLE_COMMAND_TYPE_IDS:
+        return None
+    cot = data[8]
+    if (cot & 0x3F) != _COT_ACTIVATION:  # 仅激活（含选择/执行）
+        return None
+    if not data[-1] & 0x80:  # 信息体末字节 bit7 = SE，1 表示选择命令
+        return None
+    common_address = data[10] | (data[11] << 8)
+    ioa = data[12] | (data[13] << 8) | (data[14] << 16)
+    return common_address, ioa
 
 
 class IEC104Server:
@@ -39,14 +102,20 @@ class IEC104Server:
         transport_security: c104.TransportSecurity | None = None,
         one_way_tls_config: IEC104OneWayTlsConfig | None = None,
         connection_history_size: int = 100,
+        message_log_label: str = "",
+        command_mode: str = IEC104_COMMAND_MODE_DIRECT,
     ):
         """
         初始化IEC 104服务器
         :param ip: 服务器监听IP地址，默认0.0.0.0表示监听所有接口
         :param port: 服务器监听端口，默认2404是IEC 104标准端口
+        :param message_log_label: 报文文件日志中的设备/端点标签
+        :param command_mode: 遥控命令传输模式，direct / select_and_execute / auto
         """
         self.ip = ip
         self.port = port
+        self.message_log_label = message_log_label or f"服务端 {ip}:{port}"
+        self.command_mode = normalize_command_mode(command_mode)
         # 创建c104服务器实例
         backend_ip = ip
         backend_port = port
@@ -104,6 +173,10 @@ class IEC104Server:
         self.points: list[c104.Point] = []
         # 存储所有命令点的列表
         self.commands: list[c104.Point] = []
+        # (common_address, IOA) -> 命令点，用于运行时切换命令传输模式
+        self.command_points: dict[tuple[int, int], c104.Point] = {}
+        # 已输出过模式不匹配诊断提示的命令点，避免重复刷屏
+        self._command_mode_hinted: set[tuple[int, int]] = set()
         # 关联测点map
         self.related_point_map = {}
         # 命令接收后的应用层回调（由 handler 注册，用于同步应用层 BasePoint）
@@ -129,6 +202,73 @@ class IEC104Server:
             self.message_capture.add_rx(data)
         except Exception as e:
             log.error(f"记录接收报文失败: {e}")
+        log_frame("RX", data, self.message_log_label)
+        self._diagnose_command_mode(data)
+
+    def _diagnose_command_mode(self, data: bytes) -> None:
+        """命令传输模式不匹配时给出一次诊断提示。
+
+        原始报文回调由 c104 异步投递，晚于 ASDU 处理，无法在同一帧内纠正模式，
+        因此这里只记录可操作的排查建议。
+        """
+        try:
+            target = parse_select_command(data)
+        except Exception as e:  # 解析失败不影响主流程
+            log.debug(f"解析选择命令失败: {e}")
+            return
+        if target is None or target in self._command_mode_hinted:
+            return
+        point = self.command_points.get(target)
+        if point is None:
+            return
+        self._command_mode_hinted.add(target)
+        try:
+            if point.command_mode == c104.CommandMode.DIRECT:
+                log.warning(
+                    f"命令点 CA={target[0]} IOA={target[1]} 收到主站的选择(SELECT)命令，但当前命令传输模式为"
+                    "直接执行(DIRECT)，该命令会被否定确认（COT=0x47）。"
+                    "若主站采用“先选择后执行”流程，请将设备运行参数 command_mode 设为 select_and_execute 后重启设备。"
+                )
+        except Exception as e:  # 读取属性失败不影响主流程
+            log.debug(f"读取命令点传输模式失败: {e}")
+
+    def set_point_command_mode(
+        self,
+        io_address: int,
+        command_mode: c104.CommandMode,
+        common_address: int = 1,
+        note: str = "",
+    ) -> bool:
+        """运行时切换命令点的传输模式（DIRECT / SELECT_AND_EXECUTE）。
+
+        Args:
+            io_address: 信息对象地址(IOA)
+            command_mode: c104.CommandMode 目标模式
+            common_address: 站地址
+            note: 附加到日志中的说明
+
+        Returns:
+            切换成功返回 True
+        """
+        point = self.command_points.get((common_address, io_address))
+        if point is None:
+            return False
+        try:
+            if point.command_mode == command_mode:
+                self._command_mode_switched.add((common_address, io_address))
+                return True
+            point.command_mode = command_mode
+        except Exception as e:
+            log.error(f"切换命令点传输模式失败: CA={common_address}, IOA={io_address}, {e}")
+            return False
+        self._command_mode_hinted.discard((common_address, io_address))
+        if command_mode == c104.CommandMode.SELECT_AND_EXECUTE:
+            mode_name = "选择后执行(SELECT_AND_EXECUTE)"
+        else:
+            mode_name = "直接执行(DIRECT)"
+        suffix = f"（{note}）" if note else ""
+        log.info(f"命令点 CA={common_address} IOA={io_address} 传输模式切换为{mode_name}{suffix}")
+        return True
 
     def _on_send_raw(self, server: c104.Server, data: bytes) -> None:
         """发送原始报文回调"""
@@ -136,6 +276,7 @@ class IEC104Server:
             self.message_capture.add_tx(data)
         except Exception as e:
             log.error(f"记录发送报文失败: {e}")
+        log_frame("TX", data, self.message_log_label)
 
     def set_connection_state_callback(self, callback) -> None:
         """Register the application lifecycle callback."""
@@ -241,6 +382,7 @@ class IEC104Server:
         point_type: c104.Type = c104.Type.C_RC_TA_1,
         related_point_ioa: int | None = None,
         common_address: int = 1,
+        command_mode: str | None = None,
     ) -> c104.Point | None:
         """
         添加一个命令点到指定站
@@ -248,11 +390,19 @@ class IEC104Server:
         :param point_type: 点类型，默认是调节步命令(C_RC_TA_1)
         :param related_point_ioa: 关联的监控点IOA
         :param common_address: 站地址（对应从站 slave_id）
+        :param command_mode: 命令传输模式，None 表示沿用服务器配置（self.command_mode）
         :return: 创建的命令点对象
         """
         station = self.get_station(common_address)
+        # 命令传输模式与主站流程必须一致，否则命令会被否定确认（COT=0x47）
+        mode = normalize_command_mode(command_mode or self.command_mode)
+        c104_mode = (
+            c104.CommandMode.SELECT_AND_EXECUTE
+            if mode == IEC104_COMMAND_MODE_SELECT_AND_EXECUTE
+            else c104.CommandMode.DIRECT
+        )
         # 创建命令点
-        command = station.add_point(io_address=io_address, type=point_type)
+        command = station.add_point(io_address=io_address, type=point_type, command_mode=c104_mode)
         if not command:
             log.warning(f"创建命令点失败: IOA={io_address}, type={point_type}, common_address={common_address}")
             return None
@@ -260,6 +410,7 @@ class IEC104Server:
         command.on_receive(callable=self._on_command_received)
         # 添加到命令点列表
         self.commands.append(command)
+        self.command_points[(common_address, io_address)] = command
         self._ioa_to_ca[io_address] = common_address
         return command
 

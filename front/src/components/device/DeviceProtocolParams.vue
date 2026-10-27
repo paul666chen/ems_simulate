@@ -55,6 +55,18 @@
           :placeholder="translateFieldKey(field.placeholder)"
           autocomplete="new-password"
         />
+        <el-select
+          v-else-if="field.kind === 'select'"
+          v-model="modelValue.values[field.key]"
+          style="width: 100%"
+        >
+          <el-option
+            v-for="option in field.options || []"
+            :key="option.value"
+            :label="translateFieldKey(option.label)"
+            :value="option.value"
+          />
+        </el-select>
         <el-input-number
           v-else
           v-model="modelValue.values[field.key]"
@@ -124,6 +136,18 @@
             :placeholder="translateFieldKey(field.placeholder)"
             autocomplete="new-password"
           />
+          <el-select
+            v-else-if="field.kind === 'select'"
+            v-model="modelValue.values[field.key]"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="option in field.options || []"
+              :key="option.value"
+              :label="translateFieldKey(option.label)"
+              :value="option.value"
+            />
+          </el-select>
           <el-input-number
             v-else
             v-model="modelValue.values[field.key]"
@@ -191,7 +215,20 @@
             :label="translateFieldKey(field.label)"
             label-width="180px"
           >
+            <el-select
+              v-if="field.kind === 'select'"
+              v-model="modelValue.values[field.key]"
+              style="width: 100%"
+            >
+              <el-option
+                v-for="option in field.options || []"
+                :key="option.value"
+                :label="translateFieldKey(option.label)"
+                :value="option.value"
+              />
+            </el-select>
             <el-input-number
+              v-else
               v-model="modelValue.values[field.key]"
               :min="field.min"
               :max="field.max"
@@ -237,11 +274,12 @@ function translateFieldKey(key?: string) {
 type FieldDefinition = {
   key: string;
   label: string;
-  kind?: "number" | "boolean" | "checkbox" | "text" | "password" | "directory";
+  kind?: "number" | "boolean" | "checkbox" | "text" | "password" | "directory" | "select";
   min?: number;
   max?: number;
   step?: number;
   unit?: string;
+  options?: { value: string; label: string }[];
   advanced?: boolean;
   protocolSpecific?: boolean;
   visibleWhen?: { key: string; value: number | boolean | string };
@@ -503,6 +541,21 @@ const iec104Client: FieldDefinition[] = [
 
 const iec104Server: FieldDefinition[] = [
   ...iec104LinkFields,
+  {
+    key: "command_mode",
+    label: "protocolParams.commandMode",
+    kind: "select",
+    default: "direct",
+    tip: "protocolParams.commandModeTip",
+    protocolSpecific: true,
+    options: [
+      { value: "direct", label: "protocolParams.commandModeDirect" },
+      {
+        value: "select_and_execute",
+        label: "protocolParams.commandModeSelectAndExecute",
+      },
+    ],
+  },
   {
     key: "max_connections",
     label: "protocolParams.maxConnections",

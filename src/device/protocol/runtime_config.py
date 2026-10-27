@@ -43,6 +43,9 @@ IEC104_SERVER_DEFAULTS = {
     "t2_timeout_s": 10,
     "t3_interval_s": 20,
     "max_connections": 0,
+    # 遥控命令传输模式：direct（直接执行，主站只发执行令）/
+    # select_and_execute（先选择后执行，主站先发选择令再发执行令）
+    "command_mode": "direct",
 }
 
 IEC101_COMMON_DEFAULTS = {
@@ -266,6 +269,10 @@ def normalize_protocol_params(protocol_type: int, conn_type: int, values: dict[s
                 if not parts or any(not part.isdigit() for part in parts):
                     raise ValueError(f"参数 {name} 必须是逗号或点分隔的数字，例如 1,1,1,999,1")
                 value = ",".join(str(int(part)) for part in parts)
+            elif name == "command_mode":
+                value = value.lower()
+                if value not in {"direct", "select_and_execute"}:
+                    raise ValueError("参数 command_mode 必须是 direct 或 select_and_execute")
             elif name in _SELECTOR_MAX_BYTES:
                 compact = re.sub(r"[\s:-]", "", value)
                 if not compact or len(compact) % 2 or not re.fullmatch(r"[0-9a-fA-F]+", compact):

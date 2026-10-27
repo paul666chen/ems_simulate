@@ -191,6 +191,7 @@ class Device:
         """构建协议配置字典"""
         return {
             "channel_id": self.device_id,
+            "device_name": self.name,
             "ip": self.ip,
             "port": self.port,
             "serial_port": self.serial_port,
