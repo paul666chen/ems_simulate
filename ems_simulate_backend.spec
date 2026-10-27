@@ -22,6 +22,8 @@ if DATA_SCOPE not in {"point_csv", "all"}:
 
 datas = [
     (str(PROJECT_ROOT / "www"), "www"),
+    # 版本号单一真相源：frozen 环境下 src/__init__.py 从 bundle 根目录读取
+    (str(PROJECT_ROOT / "pyproject.toml"), "."),
     (
         str(PROJECT_ROOT / "src" / "modeling" / "profile_packages"),
         "src/modeling/profile_packages",

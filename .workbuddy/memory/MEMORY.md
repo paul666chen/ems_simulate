@@ -22,7 +22,8 @@
 - 官方脚本 `scripts/build_windows.ps1`：版本同步 → `npm run build:fast`（front → www/）→ PyInstaller onedir（`ems_simulate_backend.spec`，env: EMS_PYINSTALLER_MODE=onedir/NAME=ems_simulate/CONSOLE=1）→ 组装 `build/windows/ems-simulate/` + `build/ems-simulate_windows_X.Y.Z.zip`。
 - 构建依赖：`uv sync --extra dev --extra build`（pyinstaller+altgraph+pillow，走 7892 代理）。
 - 本机测试打包产物须 `--port 9002`（8991 被系统保留）；打包 exe 运行时会自建 data/log/config/upload/plan。
-- 已知瑕疵：frozen 版 /api/health version=0.0.0（bundle 无版本元数据；修复思路见当日日志）。
+- 已知瑕疵：~~frozen 版 /api/health version=0.0.0~~ **已于 5.4.0 修复**（spec datas 增加 `(pyproject.toml, ".")`，`src/__init__.py` frozen 时读 `sys._MEIPASS/pyproject.toml`）。
+- 版本单一真相源 = `pyproject.toml`，`scripts/sync_version.py` 同步到 package.json / tauri.conf.json / Cargo.toml / Package.appxmanifest；当前 **5.4.0**。
 - **重新打包的三大坑（WorkBuddy safe-delete 防护，2026-09-29 实测）**：
   1. 构建前先手动清理 `build/build_pyinstaller`、`build/dist`、`build/windows/ems-simulate`（免沙箱 rm 授权），否则 PyInstaller --clean 被拦。
   2. 构建会话开头设 `$env:CODEBUDDY_SAFE_DELETE_ENABLED='0'`（拦截器官方开关），否则 vite emptyDir 清空 www 被拦。
