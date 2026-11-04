@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from PySide6.QtCore import QEvent, QObject  # noqa: E402
 from PySide6.QtWidgets import QApplication, QWidget  # noqa: E402
 
 from packet_analyzer.main import DEMO_FRAMES  # noqa: E402
@@ -21,12 +22,42 @@ from packet_analyzer.ui.main_window import MainWindow  # noqa: E402
 MAX_TOP_LEVEL = 1  # 只允许主窗口
 
 
+class TransientWindowWatcher(QObject):
+    """捕获任何一瞬间变成"窗口"的控件。
+
+    只看某一时刻的 topLevelWidgets() 是不够的：控件可能在同一个事件循环迭代里
+    先变成可见的顶级窗口、随后又被 addWidget 重新认父，采样根本抓不到，但屏幕上
+    确实闪了一下。这里监听 Show/Polish 事件，只要事件发生时 isWindow() 为真就记账。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.hits: list[tuple[str, str]] = []
+
+    def reset(self) -> None:
+        self.hits.clear()
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 - Qt 命名
+        is_window_event = event.type() in (QEvent.Type.Show, QEvent.Type.Polish)
+        if (
+            is_window_event
+            and isinstance(obj, QWidget)
+            and obj.isWindow()
+            and type(obj).__name__ != "MainWindow"  # 主窗口本身当然会显示
+        ):
+            self.hits.append((type(obj).__name__, obj.windowTitle()))
+        return False
+
+
 def visible_top_level() -> list[QWidget]:
     return [w for w in QApplication.topLevelWidgets() if w.isVisible()]
 
 
 def main() -> int:
     app = QApplication([sys.argv[0], "-platform", "offscreen"])
+    watcher = TransientWindowWatcher()
+    app.installEventFilter(watcher)
+
     window = MainWindow()
     window.resize(1440, 880)
     window.show()
@@ -59,18 +90,30 @@ def main() -> int:
     check(model.rowCount() == len(DEMO_FRAMES), f"表格行数 = {model.rowCount()}")
 
     # 逐行切换（等价于用户连续点击报文）
+    # 这里同时检查"瞬时闪现"：只看采样点会漏掉一闪而过的顶层窗口
+    watcher.reset()
     for row in range(model.rowCount()):
         window.table.selectRow(row)
         app.processEvents()
     assert_no_extra_window("逐行切换一遍后")
+    check(
+        not watcher.hits,
+        f"逐行切换期间没有控件短暂变成窗口（捕获 {len(watcher.hits)} 次）"
+        + (f"，如：{watcher.hits[:5]}" if watcher.hits else ""),
+    )
 
     # 反复切换，确认没有控件泄漏
     widget_count_after_first = len(window.findChildren(QWidget))
+    watcher.reset()
     for _ in range(3):
         for row in range(model.rowCount()):
             window.table.selectRow(row)
             app.processEvents()
     assert_no_extra_window("反复切换 3 轮后")
+    check(
+        not watcher.hits,
+        f"反复切换期间没有控件短暂变成窗口（捕获 {len(watcher.hits)} 次）",
+    )
 
     widget_count = len(window.findChildren(QWidget))
     check(
