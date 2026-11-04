@@ -1,16 +1,20 @@
-# 电力协议报文解析器（独立 PySide6 工具）
+# 电力协议报文解析器（PySide6 版 · Windows）
 
 从 EMS Simulate 中抽出的报文解析能力，做成**不依赖主项目运行环境**的桌面工具：
 同一套字段级解析内核，重写成 Qt 桌面界面，同时补上离线导入与 TCP 实时抓包。
+
+> **分支说明**：本分支（`feature/pyside6-windows`）是**纯 PySide6 / Windows 版本**，
+> 界面直接 `from PySide6 import ...`，不含 Qt5 兼容层，也不含 Linux 离线部署脚本。
+>
+> 需要在 glibc 2.19 等老 Linux 上运行（Qt6 装不上，只能 Qt5）请看 `feature/pyside2-qt5` 分支：
+> 那里有 `ui/qtcompat.py` 兼容层、`pa.sh`/`pa-gui.sh` 启动脚本与离线打包工具。
+> 两个分支的 `core/`（解析内核）完全一致，改动可以互相摘取。
 
 ```
 packet_analyzer/
 ├── main.py                # 图形版入口（含 --demo / --selftest / --screenshot）
 ├── cli.py                 # 命令行版入口（无 Qt，可在无图形环境运行）
 ├── pa.sh / install.sh     # Linux 命令行版启动与自检脚本
-├── scripts/
-│   ├── build_linux_bundle.sh   # 生成 Linux 离线部署包
-│   └── build_linux_bundle.py   # 打包实现（精确写入权限位）
 ├── run.bat / run.sh       # 一键启动
 ├── packet_analyzer.spec   # PyInstaller 打包配置（onedir）
 ├── build_windows.ps1      # 打包 + 生成 zip 的脚本
@@ -95,32 +99,6 @@ packet_analyzer/
 Linux 需 `libpcap`（如 `apt install libpcap0.8`）；macOS 自带。
 
 可选：装 `psutil` 后网卡列表能显示"以太网"这类系统连接名（不装则显示硬件型号）。
-
-### 老 Linux 服务器（无图形 / glibc 太老）
-
-图形版依赖 Qt 6，要求 **glibc ≥ 2.28**；Debian 8 / glibc 2.19 这类老系统装不上。
-这种情况用**命令行版**：核心解析代码完全相同（`core/` 不含 Qt），另外提供一套 CLI。
-
-```bash
-# 1. 打包（在开发机上，产物约 26MB，内含便携 CPython 3.10）
-bash packet_analyzer/scripts/build_linux_bundle.sh
-#   → build/linux/packet-analyzer-linux-x86_64.tar.gz
-
-# 2. 传到服务器并解压（不需要 root，不动系统 Python）
-scp build/linux/packet-analyzer-linux-x86_64.tar.gz ess@<服务器>:~/
-ssh ess@<服务器>
-tar xzf packet-analyzer-linux-x86_64.tar.gz && cd packet-analyzer
-./install.sh          # 自检 + 权限检查
-
-# 3. 使用
-./pa.sh ifaces
-sudo ./pa.sh capture --iface eth0 --ip 192.168.1.10 --duration 60 --log run.pcap
-./pa.sh replay run.pcap --protocol modbus_tcp
-./pa.sh parse 000100000006010300000009
-```
-
-便携 Python 来自 python-build-standalone（面向 glibc 2.17+ 构建），解压即用。
-详见 [docs/README-linux.md](docs/README-linux.md)。
 
 ```bat
 :: Windows
