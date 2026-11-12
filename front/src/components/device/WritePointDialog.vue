@@ -22,6 +22,19 @@
         </el-radio-group>
       </el-form-item>
 
+      <!-- 遥控 (YK) 命令阶段：IEC104 客户端按「选择-执行」流程分开下发 -->
+      <el-form-item
+        v-if="pointType === 2 && showCommandStage"
+        :label="$t('writeDialog.commandStage')"
+      >
+        <el-radio-group v-model="form.commandStage">
+          <el-radio label="select">{{ $t("writeDialog.stageSelect") }}</el-radio>
+          <el-radio label="execute">{{ $t("writeDialog.stageExecute") }}</el-radio>
+          <el-radio label="auto">{{ $t("writeDialog.stageAuto") }}</el-radio>
+        </el-radio-group>
+        <div class="field-tip">{{ $t("writeDialog.commandStageTip") }}</div>
+      </el-form-item>
+
       <!-- 遥调 (YT) -->
       <el-form-item
         v-else-if="pointType === 3"
@@ -69,6 +82,7 @@ const props = defineProps({
   currentValue: { type: [Number, String], default: "" },
   pointType: { type: Number, required: true }, // 2=YK, 3=YT
   slaveId: { type: Number, default: undefined },
+  showCommandStage: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(["update:modelValue", "success"]);
@@ -83,6 +97,7 @@ const form = reactive({
   pointCode: "",
   currentValue: "",
   value: 0 as number | string,
+  commandStage: "auto" as "select" | "execute" | "auto",
 });
 
 const title = computed(() => {
@@ -111,6 +126,7 @@ const handleSubmit = async () => {
       props.pointCode,
       val,
       props.slaveId,
+      props.pointType === 2 && props.showCommandStage ? form.commandStage : undefined,
     );
     if (success) {
       ElMessage.success(t("writeDialog.writeSent"));
@@ -128,5 +144,12 @@ const handleSubmit = async () => {
 <style scoped>
 :deep(.center-input .el-input__inner) {
   text-align: center;
+}
+.field-tip {
+  width: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-text-color-secondary);
 }
 </style>

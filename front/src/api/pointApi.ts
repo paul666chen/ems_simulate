@@ -65,12 +65,14 @@ export async function editPointData(
   pointCode: string,
   pointValue: number,
   slaveId?: number,
+  commandStage?: "select" | "execute" | "auto",
 ): Promise<boolean> {
   return await requestApi(POINT_API.EDIT_DATA, "post", {
     device_name: deviceName,
     point_code: pointCode,
     point_value: pointValue,
     slave_id: slaveId,
+    command_stage: commandStage,
   });
 }
 

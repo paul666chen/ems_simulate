@@ -1047,9 +1047,16 @@ class Device:
         source: ChangeSource | None = None,
         detail: str | None = None,
         slave_id: int | None = None,
+        command_stage: str | None = None,
     ) -> bool:
-        """异步编辑测点值"""
-        return await self.point_operator.edit_value_async(point_code, real_value, source, detail, slave_id)
+        """异步编辑测点值
+
+        :param command_stage: 遥控命令阶段，仅客户端协议受影响：
+            select=只发选择命令(S/E=1)、execute=只发执行命令(S/E=0)、auto=跟随命令传输模式
+        """
+        return await self.point_operator.edit_value_async(
+            point_code, real_value, source, detail, slave_id, command_stage
+        )
 
     def edit_point_metadata(self, point_code: str, metadata: dict) -> bool:
         """编辑测点元数据"""

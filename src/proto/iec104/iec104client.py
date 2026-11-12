@@ -17,6 +17,70 @@ from src.proto.iec104.log import log
 from src.proto.iec104.message_log import log_frame
 from src.proto.iec104.tls import IEC104OneWayTlsConfig, TlsClientBridge
 
+# ---------------------------------------------------------------------------
+# 遥控命令阶段：对应 IEC104 命令信息对象的 S/E 位
+#   auto    跟随点自身的命令传输模式（DIRECT 只发执行；SELECT_AND_EXECUTE 连带选择）
+#   select  只发选择命令(S/E=1)，收到肯定确认后即停，等待后续执行命令
+#   execute 只发执行命令(S/E=0)，不发送前置选择命令
+# ---------------------------------------------------------------------------
+IEC104_COMMAND_STAGE_AUTO = "auto"
+IEC104_COMMAND_STAGE_SELECT = "select"
+IEC104_COMMAND_STAGE_EXECUTE = "execute"
+IEC104_COMMAND_STAGES = (
+    IEC104_COMMAND_STAGE_AUTO,
+    IEC104_COMMAND_STAGE_SELECT,
+    IEC104_COMMAND_STAGE_EXECUTE,
+)
+
+_C104_STAGE_MAP: dict[str, Any] = {}
+
+
+def _refresh_stage_map() -> None:
+    """把命令阶段字符串映射到 c104.CommandStage，旧版 c104 上映射为空。"""
+    _C104_STAGE_MAP.clear()
+    stage_enum = getattr(c104, "CommandStage", None)
+    if stage_enum is None:
+        return
+    for name, keyword in (
+        (IEC104_COMMAND_STAGE_AUTO, "AUTO"),
+        (IEC104_COMMAND_STAGE_SELECT, "SELECT"),
+        (IEC104_COMMAND_STAGE_EXECUTE, "EXECUTE"),
+    ):
+        member = getattr(stage_enum, keyword, None)
+        if member is not None:
+            _C104_STAGE_MAP[name] = member
+
+
+_refresh_stage_map()
+
+
+def supports_command_stage() -> bool:
+    """当前 c104 是否支持显式指定命令阶段（只发选择/只发执行）。"""
+    return bool(_C104_STAGE_MAP)
+
+
+def normalize_command_stage(value: str | None, default: str = IEC104_COMMAND_STAGE_AUTO) -> str:
+    """归一化命令阶段取值，无法识别时回落到默认值。"""
+    if value is None:
+        return default
+    candidate = str(value).strip().lower()
+    return candidate if candidate in IEC104_COMMAND_STAGES else default
+
+
+def _transmit_command(point: c104.Point, cause, command_stage: str | None) -> bool:
+    """发送命令，并在 c104 不支持命令阶段时退回默认发送方式。"""
+    stage = _C104_STAGE_MAP.get(normalize_command_stage(command_stage))
+    if stage is None:
+        return point.transmit(cause=cause)
+    try:
+        return point.transmit(cause=cause, stage=stage)
+    except TypeError:
+        log.warning(
+            "当前 c104 版本不支持 transmit(stage=...) 参数，已按点的命令传输模式发送；"
+            "如需单独发送选择/执行命令请升级 c104"
+        )
+        return point.transmit(cause=cause)
+
 
 class IEC104Client:
     def __init__(
@@ -374,7 +438,14 @@ class IEC104Client:
             log.error(f"主动读取监控点值失败: {e}")
             return None
 
-    def write_point(self, io_address: int, value, frame_type: int = 0, common_address: int = 1) -> bool:
+    def write_point(
+        self,
+        io_address: int,
+        value,
+        frame_type: int = 0,
+        common_address: int = 1,
+        command_stage: str | None = None,
+    ) -> bool:
         """
         写入指定站中指定IOA的监控点值（发送遥控/遥调命令）
 
@@ -388,6 +459,11 @@ class IEC104Client:
         :param value: 要写入的值
         :param frame_type: 帧类型，0-遥测，1-遥信，2-遥控，3-遥调
         :param common_address: 站地址（对应从站 slave_id）
+        :param command_stage: 命令阶段，控制报文中 S/E 位的取值：
+            select  = 只发送选择命令（S/E=1），收到肯定确认后即结束，等待后续执行命令
+            execute = 只发送执行命令（S/E=0），不发送前置选择命令
+            auto    = 跟随点自身的命令传输模式（默认）：
+                      DIRECT 只发执行命令，SELECT_AND_EXECUTE 自动连带选择命令
         :return: 是否写入成功
         """
         if not self.is_connected:
@@ -437,10 +513,12 @@ class IEC104Client:
                 point.value = value
 
             # 调用 transmit() 实际发送命令报文
-            if not point.transmit(cause=c104.Cot.ACTIVATION):
+            stage = normalize_command_stage(command_stage)
+            sent = _transmit_command(point, c104.Cot.ACTIVATION, stage)
+            if not sent:
                 log.error(f"发送命令到IOA {io_address} 失败: transmit返回False (type={pt_type})")
                 return False
-            log.info(f"已发送命令到IOA {io_address}: {value} (type={pt_type})")
+            log.info(f"已发送命令到IOA {io_address}: {value} (type={pt_type}, stage={stage})")
             return True
         except Exception as e:
             log.error(f"写入监控点值失败: {e}")

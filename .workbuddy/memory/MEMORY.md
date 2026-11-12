@@ -23,7 +23,7 @@
 - 构建依赖：`uv sync --extra dev --extra build`（pyinstaller+altgraph+pillow，走 7892 代理）。
 - 本机测试打包产物须 `--port 9002`（8991 被系统保留）；打包 exe 运行时会自建 data/log/config/upload/plan。
 - 已知瑕疵：~~frozen 版 /api/health version=0.0.0~~ **已于 5.4.0 修复**（spec datas 增加 `(pyproject.toml, ".")`，`src/__init__.py` frozen 时读 `sys._MEIPASS/pyproject.toml`）。
-- 版本单一真相源 = `pyproject.toml`，`scripts/sync_version.py` 同步到 package.json / tauri.conf.json / Cargo.toml / Package.appxmanifest；当前 **5.4.1**。
+- 版本单一真相源 = `pyproject.toml`，`scripts/sync_version.py` 同步到 package.json / tauri.conf.json / Cargo.toml / Package.appxmanifest；当前 **5.4.2**。
 - **重新打包的三大坑（WorkBuddy safe-delete 防护，2026-09-29 实测）**：
   1. 构建前先手动清理 `build/build_pyinstaller`、`build/dist`、`build/windows/ems-simulate`（免沙箱 rm 授权），否则 PyInstaller --clean 被拦。
   2. 构建会话开头设 `$env:CODEBUDDY_SAFE_DELETE_ENABLED='0'`（拦截器官方开关），否则 vite emptyDir 清空 www 被拦。
@@ -35,6 +35,14 @@
 - COT 字节低 6 位=原因码、bit6=P/N 否定位：`0x47`=7(激活确认)+否定；`0x6C`=44(未知类型标识)+否定；`0x6E`=46 未知公共地址；`0x6F`=47 未知信息体地址。
 - 报文结构与本标准程序自带的区别见下：~~AUTO 自动识别~~ 不可行（c104 `onReceiveRaw` 是异步 scheduleTask，晚于 asdu 处理）。
 - 5.4.1 起新增 IEC104 报文落盘 `log/iec104_message.log`（开关 `config.ini [log] iec104_message`），配 verify 用 `tail -f`。
+
+## IEC104 遥控（客户端）三态：预置/执行/自动（5.4.2）
+- 端到端参数名 **`command_stage`**（`select` / `execute` / `auto`）：`POST /api/point/edit-data` → Device → PointOperator → IEC104ClientHandler → `IEC104Client.write_point` → `c104 Point.transmit(cause=ACTIVATION, stage=...)`。
+- 依赖 **c104 fork 本地补丁**（`F:\GITHUBCODE\c104-src`，新增 `c104.CommandStage`，**尚未推送远端**）。项目 `.venv` 是 uv 建的、**没有 pip**：需用独立环境 `F:\GITHUBCODE\cmvenv`（同 base 解释器 3.13.14）编译 `pip wheel --no-deps --no-build-isolation`（cmake 必须 `<3.28`），再 `uv pip install --force-reinstall` 装回项目 venv。
+- **`uv sync` 会用 git 源覆盖该 wheel → 三态能力丢失（仅告警并回落 auto，不崩）**；`build_windows.ps1` 不跑 uv sync，故打包产物带补丁（zip 内 `_c104.cp313-win_amd64.pyd` 可 grep `CommandStage` 验证）。
+- 前端 `WritePointDialog.vue`：仅 YK + IEC104 客户端显示阶段单选，默认 `auto`（= 改造前单击行为）；与「分/合」组合提交。
+- 测试 `tests/protocols/iec104/test_client_command_stage.py`（6 项）。设备侧若对「预置」也回 COT=10，客户端会判失败（真实设备预置只回 COT=7）。
+- 方案文档 `plan/IEC104/implementation/iec104-client-command-stage.md`。
 
 ## 本机环境注意事项（Windows / ROG-STRIX）
 - **端口 8991 被 Windows 保留区间(8902-9001)占用，禁止绑定**；本地运行后端用 `--port 9002`（或修改 config.ini）。8080 常被其他程序占用，vite 用 `--port 8090 --strictPort`。

@@ -11,6 +11,13 @@ class PointEditDataRequest(BaseModel):
     point_code: str
     point_value: float
     slave_id: int | None = Field(None, description="从机 ID，不同从站编码相同时用于精确定位测点")
+    command_stage: str | None = Field(
+        None,
+        description=(
+            "遥控命令阶段，仅客户端协议受影响：select=只发选择命令(S/E=1)、"
+            "execute=只发执行命令(S/E=0)、auto=跟随命令传输模式(默认)"
+        ),
+    )
 
 
 class PointLimitEditRequest(BaseModel):

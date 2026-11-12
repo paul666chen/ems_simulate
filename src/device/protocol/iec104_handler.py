@@ -794,13 +794,19 @@ class IEC104ClientHandler(ClientHandler):
                 return None
         return c104_value
 
-    def write_value(self, point: BasePoint, value: Any) -> bool:
+    def write_value(self, point: BasePoint, value: Any, command_stage: str | None = None) -> bool:
         """写入测点值（发送命令）
 
         根据 IEC104 ASDU 类型对值进行编码后写入：
         - 归一化类型: 使用 c104.NormalizedFloat
         - 标度化类型: 使用 c104.Int16
         - 短浮点类型: 直接 float
+
+        :param point: 目标测点
+        :param value: 目标值
+        :param command_stage: 遥控命令阶段，仅遥控/遥调命令有效：
+            select=只发选择命令(S/E=1)、execute=只发执行命令(S/E=0)、
+            auto=跟随命令传输模式（默认）
         """
         if not self._client:
             return False
@@ -817,6 +823,7 @@ class IEC104ClientHandler(ClientHandler):
                     value=encoded_value,
                     frame_type=point.frame_type,
                     common_address=common_address,
+                    command_stage=command_stage,
                 )
             elif isinstance(point, (Yx, Yk)):
                 return self._client.write_point(
@@ -824,6 +831,7 @@ class IEC104ClientHandler(ClientHandler):
                     value=bool(value),
                     frame_type=point.frame_type,
                     common_address=common_address,
+                    command_stage=command_stage,
                 )
         except Exception as e:
             if self._log:
@@ -831,6 +839,10 @@ class IEC104ClientHandler(ClientHandler):
             return False
 
         return False
+
+    async def write_value_async(self, point: BasePoint, value: Any, command_stage: str | None = None) -> bool:
+        """异步写入测点值（发送命令）"""
+        return self.write_value(point, value, command_stage)
 
     async def read_value_async(self, point: BasePoint) -> Any:
         """异步读取测点值（读取本地缓存，不发送网络请求）"""

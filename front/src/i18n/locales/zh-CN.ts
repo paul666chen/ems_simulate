@@ -615,6 +615,12 @@ export default {
     unknownError: "未知错误",
     remoteControl: "遥控操作",
     adjustSetting: "遥调设置",
+    commandStage: "命令阶段",
+    stageSelect: "遥控预置",
+    stageExecute: "遥控执行",
+    stageAuto: "预置后自动执行",
+    commandStageTip:
+      "预置：只发送选择命令（COT=6，S/E=1），需再选「执行」下发执行命令；执行：只发送执行命令（COT=6，S/E=0）；预置后自动执行：跟随点的命令传输模式，服务端为直接模式时只发执行命令，为预置-执行模式时自动完成选择→确认→执行。",
   },
   slave: {
     slaveAddress: "从机地址",

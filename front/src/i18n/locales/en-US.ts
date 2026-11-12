@@ -631,6 +631,12 @@ export default {
     unknownError: "Unknown error",
     remoteControl: "Remote Control",
     adjustSetting: "Adjust Setting",
+    commandStage: "Command Stage",
+    stageSelect: "Select (Prepare)",
+    stageExecute: "Execute",
+    stageAuto: "Select Then Execute",
+    commandStageTip:
+      "Select: transmit the select command only (COT=6, S/E=1), then choose Execute to issue the execute command. Execute: transmit the execute command only (COT=6, S/E=0). Select Then Execute: follow the point's command transmission mode, which sends the execute command only in direct mode and the full select -> confirm -> execute sequence in select-and-execute mode.",
   },
   slave: {
     slaveAddress: "Slave Address",

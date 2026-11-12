@@ -604,6 +604,7 @@
     :currentValue="currentPoint.value"
     :pointType="currentPoint.type"
     :slaveId="slaveId"
+    :show-command-stage="isIec104Client"
     @success="handleWriteSuccess"
   />
   <!-- DLT645 从站专用写入对话框 -->
@@ -931,6 +932,11 @@ const isIec104 = computed(() => {
     ["Iec104Server", "Iec104Client", "Iec101Server", "Iec101Client"].includes(t)
   );
 });
+
+/** IEC104 客户端：遥控写入需要显式选择「预置 / 执行」命令阶段 */
+const isIec104Client = computed(
+  () => String(props.protocolType) === "Iec104Client",
+);
 
 const hiddenColumns = computed(() => {
   // 始终隐藏16进制地址列（已合并到地址列）

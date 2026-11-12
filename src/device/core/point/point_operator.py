@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING
 
 from src.data.dao.channel_dao import ChannelDao
@@ -54,6 +55,8 @@ class PointOperator:
 
     def __init__(self, device: Device) -> None:
         self._device = device
+        # 处理器类型名 → 是否支持 command_stage 参数的缓存
+        self._command_stage_support: dict[str, bool] = {}
 
     @property
     def _pm(self):
@@ -140,6 +143,30 @@ class PointOperator:
             else:
                 raise SystemError(f"测点 {point_code} 协议处理器未配置，无法写入")
 
+    def _call_handler_write(self, handler, point, value, command_stage: str | None):
+        """调用处理器写入，仅在处理器支持 command_stage 时透传该参数。
+
+        只有 IEC104 客户端这类会把命令报上链路的协议才区分选择/执行，
+        其余协议保持原有调用方式，避免强制改动所有 handler 的签名。
+        """
+        if command_stage is None or not self._handler_supports_command_stage(handler):
+            return handler.write_value_async(point, value)
+        return handler.write_value_async(point, value, command_stage)
+
+    def _handler_supports_command_stage(self, handler) -> bool:
+        key = type(handler).__name__
+        cached = self._command_stage_support.get(key)
+        if cached is None:
+            try:
+                parameters = inspect.signature(handler.write_value_async).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            cached = "command_stage" in parameters or any(
+                p.kind is inspect.Parameter.VAR_KEYWORD for p in parameters.values()
+            )
+            self._command_stage_support[key] = cached
+        return cached
+
     async def edit_value_async(
         self,
         point_code: str,
@@ -147,6 +174,7 @@ class PointOperator:
         source: ChangeSource | None = None,
         detail: str | None = None,
         slave_id: int | None = None,
+        command_stage: str | None = None,
     ) -> bool:
         """异步编辑测点值，失败时抛出异常以便上层返回具体原因
 
@@ -156,6 +184,8 @@ class PointOperator:
             source: 变更来源
             detail: 变更详情
             slave_id: 从机 ID，不同从站编码相同时用于精确定位测点
+            command_stage: 遥控命令阶段，仅客户端协议受影响：
+                select=只发选择命令(S/E=1)、execute=只发执行命令(S/E=0)、auto=跟随命令传输模式
         """
         point = self._pm.get_point_by_code(point_code, slave_id)
         if not point:
@@ -181,7 +211,7 @@ class PointOperator:
 
             if self._handler:
                 try:
-                    result = await self._handler.write_value_async(point, point.value)
+                    result = await self._call_handler_write(self._handler, point, point.value, command_stage)
                 except Exception as e:
                     self._log.error(f"测点 {point_code} 写入失败: {e}")
                     raise ValueError(f"测点 {point_code} 写入失败: {e}") from e
